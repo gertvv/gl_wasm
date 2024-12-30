@@ -37,11 +37,12 @@ Create binary WebAssembly modules in Gleam.
  - [x] Building modules
  - [x] Registering types
  - [x] Building functions
- - [ ] Importing functions
+ - [x] Importing functions
  - [ ] Exporting functions
  - [ ] Type validation
  - [ ] Type recursion and subtyping
  - [ ] Global initialization
+ - [ ] Advanced validation for break/return
  - [ ] Features related to unimplemented sections
  - [ ] Use bytes_tree instead of byte_array.concat & friends
  - [ ] JavaScript target support (primarily number type encoding)
@@ -58,13 +59,13 @@ Create binary WebAssembly modules in Gleam.
  - [ ] Data/data count
  - [ ] Start
  - [ ] Export
- - [ ] Import
+ - [x] Import
  - [ ] Custom
 
 ### Instructions
 
  - [x] General control flow
- - [ ] Function calls
+ - [x] Function calls
  - [ ] General reference instructions
  - [x] Struct
  - [ ] Array
@@ -73,7 +74,7 @@ Create binary WebAssembly modules in Gleam.
  - [ ] Table
  - [ ] Memory
  - [x] i32 and i64 encoding
- - [ ] f32 and f64 encoding
+ - [x] f32 and f64 encoding
  - [x] Common i32, i64, f32, f64 instructions
  - [ ] Numeric conversions, truncations, etc.
  - [ ] v128

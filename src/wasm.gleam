@@ -12,41 +12,17 @@
 
 import gleam/bit_array
 import gleam/int
-import gleam/io
 import gleam/list
 import gleam/result
 import gleb128
+import ieee_float.{type IEEEFloat}
 import simplifile
-
-pub fn main() {
-  impl() |> io.debug
-}
-
-fn impl() {
-  // TODO: implement add/fold/sum
-  let mb = create_module_builder("out.wasm")
-  use mb <- result.try(
-    add_type_group(mb, [
-      Struct([ValueType(Immutable, I64), ValueType(Immutable, I64)]),
-    ]),
-  )
-  use mb <- result.try(
-    add_type_group(mb, [Func([Ref(NonNull(ConcreteType(0)))], [I64])]),
-  )
-  use #(mb, fb) <- result.try(create_function_builder(mb, 1))
-  use fb <- result.try(list.try_fold(
-    over: [LocalGet(0), StructGet(0, 0), End],
-    from: fb,
-    with: add_instruction,
-  ))
-  use mb <- result.try(finalize_function(mb, fb))
-  emit_module(mb) |> result.replace_error("Error writing to file")
-}
 
 // --------------------------------------------------------------------------- 
 // Type definitions
 // --------------------------------------------------------------------------- 
 
+/// Builder to enable incremental construction of a module.
 pub type ModuleBuilder {
   ModuleBuilder(
     output_file_path: String,
@@ -62,6 +38,7 @@ pub type ModuleBuilder {
   )
 }
 
+/// Builder to enable incremental construction of a function.
 pub type FunctionBuilder {
   FunctionBuilder(
     module_builder: ModuleBuilder,
@@ -77,8 +54,10 @@ pub type FunctionBuilder {
   )
 }
 
+/// Functions can be defined via import or implementation. While they are being
+/// constructed the `FunctionMissing` placeholder is used.
 pub type FunctionDefinition {
-  FunctionImport(type_index: Int, Import)
+  FunctionImport(type_index: Int, ImportSource)
   FunctionImplementation(
     type_index: Int,
     locals: List(ValueType),
@@ -87,11 +66,19 @@ pub type FunctionDefinition {
   FunctionMissing(type_index: Int)
 }
 
-pub type Import {
-  Import(module: String, name: String)
+/// Represents an import source.
+pub type ImportSource {
+  ImportSource(module: String, name: String)
 }
 
-/// Value types are the types that a variable accepts
+type Import {
+  ImportFunction(module: String, name: String, type_index: Int)
+  // TODO: ImportTable
+  // TODO: ImportMemory
+  // TODO: ImportGlobal
+}
+
+/// Value types are the types that a variable accepts.
 pub type ValueType {
   I32
   I64
@@ -101,14 +88,14 @@ pub type ValueType {
   Ref(RefType)
 }
 
-/// Reference type
+/// Reference type.
 pub type RefType {
   NonNull(HeapType)
   Nullable(HeapType)
 }
 
 /// Heap types classify the objects in the runtime store.
-/// They may be abstract or concrete
+/// They may be abstract or concrete.
 pub type HeapType {
   AbstractFunc
   AbstractNoFunc
@@ -123,7 +110,7 @@ pub type HeapType {
   ConcreteType(Int)
 }
 
-/// Composite types are those composed from simpler types
+/// Composite types are those composed from simpler types.
 pub type CompositeType {
   Func(List(ValueType), List(ValueType))
   Array(FieldType)
@@ -137,19 +124,19 @@ pub type FieldType {
   ValueType(mutable: Mutability, ValueType)
 }
 
-/// Indicates wheter a field is mutable
+/// Indicates wheter a field is mutable.
 pub type Mutability {
   Mutable
   Immutable
 }
 
-/// Packed types cannot exist as standalone values but can be fields
+/// Packed types cannot exist as standalone values but can be fields.
 pub type PackedType {
   I8
   I16
 }
 
-/// Labels keep track of the scope (block/frame)
+/// Labels keep track of the scope (block/frame).
 pub type Label {
   LabelFunc(stack_limit: Int, result: List(ValueType))
   LabelBlock(stack_limit: Int, result: List(ValueType))
@@ -158,7 +145,7 @@ pub type Label {
   LabelElse(stack_limit: Int, result: List(ValueType))
 }
 
-/// WebAssembly instructions (code)
+/// WebAssembly instructions (code).
 pub type Instruction {
   // Control instructions
   Unreachable
@@ -177,7 +164,9 @@ pub type Instruction {
   // TODO: ReturnCallIndirect
   CallRef(type_index: Int)
   ReturnCallRef(type_index: Int)
-  // TODO: BreakOn*
+  BreakOnNull(label_index: Int)
+  BreakOnNonNull(label_index: Int)
+  // TODO: BreakOnCast*
   End
   //
   // Reference instructions
@@ -214,11 +203,11 @@ pub type Instruction {
   // TODO: memory instructions
   //
   // Numeric instructions
-  // TODO: should some of the *Const constructions take a BitArray?
+  // TODO: should I64Const take a BitArray for JavaScript safety?
   I32Const(value: Int)
   I64Const(value: Int)
-  F32Const(value: Float)
-  F64Const(value: Float)
+  F32Const(value: IEEEFloat)
+  F64Const(value: IEEEFloat)
   I32EqZ
   I32Eq
   I32NE
@@ -323,7 +312,7 @@ pub type Instruction {
   // TODO: vector instructions
 }
 
-/// BlockType represents the value produced by a block (or empty)
+/// BlockType represents the value produced by a block (or empty).
 pub type BlockType {
   BlockEmpty
   BlockValue(ValueType)
@@ -428,8 +417,8 @@ pub fn create_function_builder(
       let module_builder =
         ModuleBuilder(
           ..mb,
-          functions: [FunctionMissing(type_index)],
-          next_function_index: mb.next_type_index + 1,
+          functions: [FunctionMissing(type_index), ..mb.functions],
+          next_function_index: mb.next_function_index + 1,
         )
       Ok(#(
         module_builder,
@@ -447,7 +436,27 @@ pub fn create_function_builder(
         ),
       ))
     }
-    _ -> Error("No func type at this index")
+    _ -> Error("Type $" <> int.to_string(type_index) <> " is not a func")
+  }
+}
+
+/// Import a function.
+pub fn import_function(
+  mb: ModuleBuilder,
+  type_index: Int,
+  from: ImportSource,
+) -> Result(ModuleBuilder, String) {
+  case get_type_by_index(mb, type_index) {
+    Ok(Func(_, _)) -> {
+      Ok(
+        ModuleBuilder(
+          ..mb,
+          functions: [FunctionImport(type_index, from), ..mb.functions],
+          next_function_index: mb.next_function_index + 1,
+        ),
+      )
+    }
+    _ -> Error("Type $" <> int.to_string(type_index) <> " is not a func")
   }
 }
 
@@ -456,7 +465,7 @@ fn get_function(
   function_index: Int,
 ) -> Result(FunctionDefinition, String) {
   let mb = fb.module_builder
-  list_index(mb.functions, mb.next_function_index - function_index)
+  list_index(mb.functions, mb.next_function_index - function_index - 1)
   |> result.replace_error(
     "Function index " <> int.to_string(function_index) <> " does not exist",
   )
@@ -561,10 +570,37 @@ pub fn add_instruction(
       check_stack_top(fb, break_to.result)
     }
     Return -> check_stack_top(fb, fb.result)
-    Call(_function_index) -> todo
-    ReturnCall(_function_index) -> todo
-    CallRef(_type_index) -> todo
-    ReturnCallRef(_type_index) -> todo
+    Call(index) | CallRef(index) | ReturnCall(index) | ReturnCallRef(index) -> {
+      let #(is_return, is_ref) = case instr {
+        Call(_) -> #(False, False)
+        CallRef(_) -> #(False, True)
+        ReturnCall(_) -> #(True, False)
+        _ -> #(True, True)
+      }
+      case is_ref {
+        False ->
+          get_function(fb, index)
+          |> result.map(fn(fd) { fd.type_index })
+        True -> Ok(index)
+      }
+      |> result.try(get_type(fb, _))
+      |> result.try(fn(t) {
+        let assert Func(params, result) = t
+        let to_pop = case is_ref {
+          False -> params
+          True -> [Ref(NonNull(ConcreteType(index))), ..params]
+        }
+        pop_push(fb, to_pop, result)
+      })
+      |> result.try(fn(fb) {
+        case is_return {
+          True -> check_stack_top(fb, fb.result)
+          False -> Ok(fb)
+        }
+      })
+    }
+    BreakOnNull(_label_index) -> todo
+    BreakOnNonNull(_label_index) -> todo
     End -> {
       case top_label {
         LabelIf(result: [], ..) -> Ok(fb)
@@ -604,8 +640,25 @@ pub fn add_instruction(
       pop_push(fb, [Ref(Nullable(AbstractAny)), Ref(Nullable(AbstractAny))], [
         I32,
       ])
-    RefTest(_ref_type) -> todo
-    RefCast(_ref_type) -> todo
+    RefTest(ref_type) | RefCast(ref_type) -> {
+      let result = case instr {
+        RefTest(_) -> [I32]
+        _ -> [Ref(ref_type)]
+      }
+      stack_top(fb)
+      |> result.try(fn(t) {
+        case value_type_subtype_of(fb, is: Ref(ref_type), of: t) {
+          True -> pop_push(fb, [t], result)
+          False ->
+            Error(
+              "Expected a supertype of "
+              <> value_type_to_string(Ref(ref_type))
+              <> " at depth 0 but got "
+              <> value_type_to_string(t),
+            )
+        }
+      })
+    }
     StructNew(type_index) -> {
       get_type(fb, type_index)
       |> result.try(unpack_struct_fields(_, type_index))
@@ -1048,7 +1101,7 @@ pub fn finalize_function(
     [] ->
       list_replace(
         mb.functions,
-        fb.function_index,
+        mb.next_function_index - fb.function_index - 1,
         FunctionImplementation(
           fb.type_index,
           list.reverse(fb.locals),
@@ -1071,22 +1124,47 @@ pub fn finalize_function(
 ///
 /// Assumes the WebAssembly module is valid.
 pub fn emit_module(mb: ModuleBuilder) -> Result(Nil, simplifile.FileError) {
+  // TODO: validation
+
   let header = <<0x00, 0x61, 0x73, 0x6d>>
   let version = <<0x01, 0x00, 0x00, 0x00>>
   let _ = simplifile.write_bits("out.wasm", <<header:bits, version:bits>>)
 
   // emit types
-  // TODO: recursive type groups (get rid of flatten)!
-  let types = list.reverse(mb.types) |> list.flatten |> list.map(encode_typedef)
+  let types = list.reverse(mb.types) |> list.map(encode_type_group)
   use _ <- result.try(simplifile.append_bits(
     "out.wasm",
     encode_section(section_type, encode_vector(types)),
   ))
 
+  // emit imports
+  let func_imports =
+    list.reverse(mb.functions)
+    |> list.filter_map(fn(func) {
+      case func {
+        FunctionImplementation(_, _, _) -> Error(Nil)
+        FunctionImport(type_index, from) ->
+          Ok(ImportFunction(from.module, from.name, type_index))
+        FunctionMissing(_) -> Error(Nil)
+      }
+    })
+    |> list.map(encode_import)
+  use _ <- result.try(simplifile.append_bits(
+    "out.wasm",
+    encode_section(section_import, encode_vector(func_imports)),
+  ))
+
   // emit function type declarations
   let func_types =
     list.reverse(mb.functions)
-    |> list.map(fn(func) { leb128_encode_unsigned(func.type_index) })
+    |> list.filter_map(fn(func) {
+      case func {
+        FunctionImplementation(type_index:, ..) ->
+          Ok(leb128_encode_unsigned(type_index))
+        FunctionImport(_, _) -> Error(Nil)
+        FunctionMissing(_) -> Error(Nil)
+      }
+    })
   use _ <- result.try(simplifile.append_bits(
     "out.wasm",
     encode_section(section_func, encode_vector(func_types)),
@@ -1186,6 +1264,17 @@ fn encode_result_type(rs: List(ValueType)) -> BitArray {
   |> encode_vector
 }
 
+fn encode_type_group(ts: List(CompositeType)) -> BitArray {
+  case ts {
+    [t] -> encode_typedef(t)
+    _ ->
+      bit_array.append(
+        code_type_rec,
+        encode_vector(list.map(ts, encode_typedef)),
+      )
+  }
+}
+
 fn encode_typedef(t: CompositeType) -> BitArray {
   case t {
     Array(element) -> [code_type_array, encode_field_type(element)]
@@ -1197,6 +1286,22 @@ fn encode_typedef(t: CompositeType) -> BitArray {
     Struct(fields) -> [code_type_struct, encode_field_types(fields)]
   }
   |> bit_array.concat
+}
+
+fn encode_import(i: Import) -> BitArray {
+  [
+    encode_name(i.module),
+    encode_name(i.name),
+    case i {
+      ImportFunction(type_index:, ..) ->
+        bit_array.append(<<0x00>>, leb128_encode_unsigned(type_index))
+    },
+  ]
+  |> bit_array.concat
+}
+
+fn encode_name(name: String) -> BitArray {
+  prepend_byte_size(bit_array.from_string(name))
 }
 
 fn encode_function_code(
@@ -1243,6 +1348,16 @@ fn encode_instruction(instr: Instruction) -> BitArray {
       bit_array.concat([
         code_instr_return_call_ref,
         leb128_encode_unsigned(type_index),
+      ])
+    BreakOnNull(label_index) ->
+      bit_array.concat([
+        code_instr_break_on_null,
+        leb128_encode_unsigned(label_index),
+      ])
+    BreakOnNonNull(label_index) ->
+      bit_array.concat([
+        code_instr_break_on_non_null,
+        leb128_encode_unsigned(label_index),
       ])
     // TODO: BreakOn*
     End -> code_instr_end
@@ -1306,7 +1421,6 @@ fn encode_instruction(instr: Instruction) -> BitArray {
         leb128_encode_unsigned(type_index),
         leb128_encode_unsigned(field_index),
       ])
-    // TODO: struct.get_s / struct.get_u
     StructSet(type_index, field_index) ->
       bit_array.concat([
         code_instr_struct_set,
@@ -1362,8 +1476,10 @@ fn encode_instruction(instr: Instruction) -> BitArray {
       bit_array.concat([code_instr_i32_const, gleb128.encode_signed(value)])
     I64Const(value) ->
       bit_array.concat([code_instr_i64_const, gleb128.encode_signed(value)])
-    F32Const(_value) -> todo
-    F64Const(_value) -> todo
+    F32Const(value) ->
+      bit_array.concat([code_instr_f32_const, ieee_float.to_bytes_32_le(value)])
+    F64Const(value) ->
+      bit_array.concat([code_instr_f64_const, ieee_float.to_bytes_64_le(value)])
     I32EqZ -> code_instr_i32_eq_z
     I32Eq -> code_instr_i32_eq
     I32NE -> code_instr_i32_ne
@@ -1574,21 +1690,19 @@ const code_instr_break = <<0x0c>>
 
 const code_instr_break_if = <<0x0d>>
 
-const code_instr_break_table = <<0x0e>>
-
 const code_instr_return = <<0x0f>>
 
 const code_instr_call = <<0x10>>
 
-const code_instr_call_indirect = <<0x11>>
-
 const code_instr_return_call = <<0x12>>
-
-const code_instr_return_call_indirect = <<0x13>>
 
 const code_instr_call_ref = <<0x14>>
 
 const code_instr_return_call_ref = <<0x15>>
+
+const code_instr_break_on_null = <<0xd5>>
+
+const code_instr_break_on_non_null = <<0xd6>>
 
 const code_instr_drop = <<0x1a>>
 
