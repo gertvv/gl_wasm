@@ -1,0 +1,5 @@
+[tools]
+"npm:binaryen" = "118"
+elixir = "latest"
+erlang = "latest"
+gleam = "1.6"
