@@ -43,6 +43,7 @@ Create binary WebAssembly modules in Gleam.
  - [ ] Type recursion and subtyping
  - [ ] Global initialization
  - [ ] Features related to unimplemented sections
+ - [ ] Use bytes_tree instead of byte_array.concat & friends
  - [ ] JavaScript target support (primarily number type encoding)
  - [ ] Output stream abstraction
 
