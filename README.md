@@ -28,10 +28,6 @@ Create binary WebAssembly modules in Gleam.
 
 ## Progress
 
-### Issues
-
- - [ ] gleb128 is incompatible with stdlib >= 0.48.0 due to bytes_builder removal - [issue](https://github.com/BrendoCosta/gleb128/issues/2)
-
 ### Features
 
  - [x] Building modules
