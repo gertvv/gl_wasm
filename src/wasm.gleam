@@ -13,6 +13,7 @@
 import gleam/bit_array
 import gleam/int
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleb128
 import ieee_float.{type IEEEFloat}
@@ -33,12 +34,14 @@ pub type ModuleBuilder {
     functions: List(FunctionDefinition),
     next_function_index: Int,
     /// globals stored in reverse order
-    globals: List(ValueType),
+    globals: List(GlobalDefinition),
     next_global_index: Int,
+    exports: List(Export),
+    start_function_index: Option(Int),
   )
 }
 
-/// Builder to enable incremental construction of a function.
+/// Builder to enable incremental construction of a function or expression.
 pub type FunctionBuilder {
   FunctionBuilder(
     module_builder: ModuleBuilder,
@@ -66,6 +69,16 @@ pub type FunctionDefinition {
   FunctionMissing(type_index: Int)
 }
 
+pub type GlobalDefinition {
+  GlobalImport(mutable: Mutability, value_type: ValueType, ImportSource)
+  GlobalInitialization(
+    mutable: Mutability,
+    value_type: ValueType,
+    code: List(Instruction),
+  )
+  GlobalMissing(mutable: Mutability, value_type: ValueType)
+}
+
 /// Represents an import source.
 pub type ImportSource {
   ImportSource(module: String, name: String)
@@ -76,6 +89,10 @@ type Import {
   // TODO: ImportTable
   // TODO: ImportMemory
   // TODO: ImportGlobal
+}
+
+pub type Export {
+  ExportFunction(name: String, function_index: Int)
 }
 
 /// Value types are the types that a variable accepts.
@@ -138,6 +155,7 @@ pub type PackedType {
 
 /// Labels keep track of the scope (block/frame).
 pub type Label {
+  LabelInitializer(stack_limit: Int, result: List(ValueType))
   LabelFunc(stack_limit: Int, result: List(ValueType))
   LabelBlock(stack_limit: Int, result: List(ValueType))
   LabelLoop(stack_limit: Int, result: List(ValueType))
@@ -335,6 +353,8 @@ pub fn create_module_builder(output_file_path: String) -> ModuleBuilder {
     next_function_index: 0,
     globals: [],
     next_global_index: 0,
+    exports: [],
+    start_function_index: None,
   )
 }
 
@@ -474,17 +494,32 @@ fn get_function(
 /// Add a global to the `ModuleBuilder`.
 ///
 /// Can be done any time before creating a function that uses it.
-pub fn add_global(
+pub fn create_global_builder(
   mb: ModuleBuilder,
+  m: Mutability,
   t: ValueType,
-) -> Result(#(ModuleBuilder, Int), String) {
-  Ok(#(
+) -> Result(#(ModuleBuilder, FunctionBuilder), String) {
+  let global = GlobalMissing(m, t)
+  let module_builder =
     ModuleBuilder(
       ..mb,
-      globals: [t, ..mb.globals],
+      globals: [global, ..mb.globals],
       next_global_index: mb.next_global_index + 1,
+    )
+  Ok(#(
+    module_builder,
+    FunctionBuilder(
+      module_builder:,
+      function_index: mb.next_global_index,
+      type_index: -1,
+      params: [],
+      result: [t],
+      locals: [],
+      next_local_index: 0,
+      code: [],
+      value_stack: [],
+      label_stack: [LabelInitializer(0, [t])],
     ),
-    mb.next_global_index,
   ))
 }
 
@@ -497,6 +532,16 @@ fn get_global(
   |> result.replace_error(
     "Global index " <> int.to_string(global_index) <> " does not exist",
   )
+  |> result.map(fn(global) { global.value_type })
+}
+
+/// Mark something for export.
+pub fn add_export(
+  mb: ModuleBuilder,
+  export: Export,
+) -> Result(ModuleBuilder, String) {
+  // TODO: validation
+  Ok(ModuleBuilder(..mb, exports: [export, ..mb.exports]))
 }
 
 /// Add an instruction to the `FunctionBuilder`.
@@ -1116,6 +1161,57 @@ pub fn finalize_function(
   }
 }
 
+/// Complete the `FunctionBuilder` and replace the corresponding placeholder in
+/// `ModuleBuilder` by the validated global initalization code.
+pub fn finalize_global(
+  mb: ModuleBuilder,
+  fb: FunctionBuilder,
+) -> Result(ModuleBuilder, String) {
+  let index = { mb.next_global_index - fb.function_index } - 1
+  case fb.label_stack {
+    [] ->
+      list_index(mb.globals, index)
+      |> result.try(fn(placeholder) {
+        list_replace(
+          mb.globals,
+          index,
+          GlobalInitialization(
+            placeholder.mutable,
+            placeholder.value_type,
+            list.reverse(fb.code),
+          ),
+        )
+      })
+      |> result.replace_error(
+        "No global at index " <> int.to_string(fb.function_index),
+      )
+      |> result.map(fn(globals) { ModuleBuilder(..mb, globals:) })
+    _ -> Error("Initializer incomplete")
+  }
+}
+
+/// Set the start function by index. It must take no arguments and produce no
+/// results.
+pub fn set_start_function(
+  mb: ModuleBuilder,
+  function_index: Int,
+) -> Result(ModuleBuilder, String) {
+  use func <- result.try(
+    list_index(mb.functions, { mb.next_function_index - function_index } - 1)
+    |> result.replace_error(
+      "No function at index " <> int.to_string(function_index),
+    ),
+  )
+  get_type_by_index(mb, func.type_index)
+  |> result.try(fn(fn_type) {
+    case fn_type {
+      Func([], []) ->
+        Ok(ModuleBuilder(..mb, start_function_index: Some(function_index)))
+      _ -> Error("Start function must be [] -> []")
+    }
+  })
+}
+
 // --------------------------------------------------------------------------- 
 // WebAssembly binary encoding
 // --------------------------------------------------------------------------- 
@@ -1169,6 +1265,46 @@ pub fn emit_module(mb: ModuleBuilder) -> Result(Nil, simplifile.FileError) {
     "out.wasm",
     encode_section(section_func, encode_vector(func_types)),
   ))
+
+  // TODO: emit tables
+
+  //  TODO: emit memory
+
+  // emit globals
+  let globals =
+    list.reverse(mb.globals)
+    |> list.filter_map(fn(global) {
+      case global {
+        GlobalInitialization(mutable:, value_type:, code:) ->
+          Ok(encode_global(mutable, value_type, code))
+        _ -> Error(Nil)
+      }
+    })
+  use _ <- result.try(simplifile.append_bits(
+    "out.wasm",
+    encode_section(section_global, encode_vector(globals)),
+  ))
+
+  // emit exports
+  let exports =
+    list.reverse(mb.exports)
+    |> list.map(encode_export)
+  use _ <- result.try(simplifile.append_bits(
+    "out.wasm",
+    encode_section(section_export, encode_vector(exports)),
+  ))
+
+  // emit start section
+  use _ <- result.try(case mb.start_function_index {
+    Some(function_index) ->
+      simplifile.append_bits(
+        "out.wasm",
+        encode_section(section_start, leb128_encode_unsigned(function_index)),
+      )
+    None -> Ok(Nil)
+  })
+
+  // TODO: emit elements
 
   // emit function code
   let func_codes =
@@ -1252,11 +1388,14 @@ fn encode_field_type(f: FieldType) -> BitArray {
     PackedType(_, I16) -> code_type_i16
     ValueType(_, value) -> encode_value_type(value)
   }
-  let mut = case f.mutable {
+  bit_array.append(valtype, encode_mutability(f.mutable))
+}
+
+fn encode_mutability(mutable: Mutability) -> BitArray {
+  case mutable {
     Mutable -> code_var
     Immutable -> code_const
   }
-  bit_array.append(valtype, mut)
 }
 
 fn encode_result_type(rs: List(ValueType)) -> BitArray {
@@ -1295,6 +1434,30 @@ fn encode_import(i: Import) -> BitArray {
     case i {
       ImportFunction(type_index:, ..) ->
         bit_array.append(<<0x00>>, leb128_encode_unsigned(type_index))
+    },
+  ]
+  |> bit_array.concat
+}
+
+fn encode_global(
+  mutable: Mutability,
+  value_type: ValueType,
+  code: List(Instruction),
+) -> BitArray {
+  [
+    encode_value_type(value_type),
+    encode_mutability(mutable),
+    ..list.map(code, encode_instruction)
+  ]
+  |> bit_array.concat
+}
+
+fn encode_export(e: Export) -> BitArray {
+  [
+    encode_name(e.name),
+    case e {
+      ExportFunction(_, function_index) ->
+        bit_array.append(<<0x00>>, leb128_encode_unsigned(function_index))
     },
   ]
   |> bit_array.concat

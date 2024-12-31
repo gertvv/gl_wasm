@@ -239,7 +239,11 @@ pub fn add_local_test() {
 
 pub fn add_global_test() {
   let mb = wasm.create_module_builder("foo.wasm")
-  let assert Ok(#(mb, _gidx)) = wasm.add_global(mb, wasm.I64)
+  let assert Ok(#(mb, gb)) =
+    wasm.create_global_builder(mb, wasm.Mutable, wasm.I64)
+  let assert Ok(gb) = wasm.add_instruction(gb, wasm.I64Const(12))
+  let assert Ok(gb) = wasm.add_instruction(gb, wasm.End)
+  let assert Ok(mb) = wasm.finalize_global(mb, gb)
   prepared_func(mb, [], [], [wasm.GlobalGet(0)])
   |> should.be_ok
 }
@@ -390,3 +394,5 @@ pub fn struct_set_test() {
   |> result.try(simple_finalize)
   |> should.be_ok
 }
+// TODO: test banned instructions in global initialization
+// TODO: test function calls
