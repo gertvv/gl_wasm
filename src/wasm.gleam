@@ -42,11 +42,10 @@ pub type ModuleBuilder {
 }
 
 /// Builder to enable incremental construction of a function or expression.
-pub type FunctionBuilder {
-  FunctionBuilder(
+pub type CodeBuilder {
+  CodeBuilder(
     module_builder: ModuleBuilder,
-    function_index: Int,
-    type_index: Int,
+    builds: BuildType,
     params: List(ValueType),
     result: List(ValueType),
     locals: List(ValueType),
@@ -55,6 +54,11 @@ pub type FunctionBuilder {
     value_stack: List(ValueType),
     label_stack: List(Label),
   )
+}
+
+pub type BuildType {
+  BuildFunction(function_index: Int, type_index: Int)
+  BuildGlobal(global_index: Int, mutable: Mutability, value_type: ValueType)
 }
 
 /// Functions can be defined via import or implementation. While they are being
@@ -419,19 +423,19 @@ pub fn add_type_group(
   )
 }
 
-fn get_type(fb: FunctionBuilder, type_index: Int) {
+fn get_type(fb: CodeBuilder, type_index: Int) {
   get_type_by_index(fb.module_builder, type_index)
 }
 
 /// Register a function placeholder with the `ModuleBuilder` and create a
-/// FunctionBuilder for it.
+/// CodeBuilder for it.
 ///
 /// Multiple function implementations can be generated in parallel, to be
 /// finalized into the `ModuleBuilder` when ready.
 pub fn create_function_builder(
   mb: ModuleBuilder,
   type_index: Int,
-) -> Result(#(ModuleBuilder, FunctionBuilder), String) {
+) -> Result(#(ModuleBuilder, CodeBuilder), String) {
   case get_type_by_index(mb, type_index) {
     Ok(Func(params, result)) -> {
       let module_builder =
@@ -442,10 +446,12 @@ pub fn create_function_builder(
         )
       Ok(#(
         module_builder,
-        FunctionBuilder(
+        CodeBuilder(
           module_builder:,
-          function_index: mb.next_function_index,
-          type_index:,
+          builds: BuildFunction(
+            function_index: mb.next_function_index,
+            type_index:,
+          ),
           params:,
           result:,
           locals: [],
@@ -481,7 +487,7 @@ pub fn import_function(
 }
 
 fn get_function(
-  fb: FunctionBuilder,
+  fb: CodeBuilder,
   function_index: Int,
 ) -> Result(FunctionDefinition, String) {
   let mb = fb.module_builder
@@ -496,10 +502,10 @@ fn get_function(
 /// Can be done any time before creating a function that uses it.
 pub fn create_global_builder(
   mb: ModuleBuilder,
-  m: Mutability,
-  t: ValueType,
-) -> Result(#(ModuleBuilder, FunctionBuilder), String) {
-  let global = GlobalMissing(m, t)
+  mutable: Mutability,
+  value_type: ValueType,
+) -> Result(#(ModuleBuilder, CodeBuilder), String) {
+  let global = GlobalMissing(mutable:, value_type:)
   let module_builder =
     ModuleBuilder(
       ..mb,
@@ -508,25 +514,25 @@ pub fn create_global_builder(
     )
   Ok(#(
     module_builder,
-    FunctionBuilder(
+    CodeBuilder(
       module_builder:,
-      function_index: mb.next_global_index,
-      type_index: -1,
+      builds: BuildGlobal(
+        global_index: mb.next_global_index,
+        mutable:,
+        value_type:,
+      ),
       params: [],
-      result: [t],
+      result: [value_type],
       locals: [],
       next_local_index: 0,
       code: [],
       value_stack: [],
-      label_stack: [LabelInitializer(0, [t])],
+      label_stack: [LabelInitializer(0, [value_type])],
     ),
   ))
 }
 
-fn get_global(
-  fb: FunctionBuilder,
-  global_index: Int,
-) -> Result(ValueType, String) {
+fn get_global(fb: CodeBuilder, global_index: Int) -> Result(ValueType, String) {
   let mb = fb.module_builder
   list_index(mb.globals, { mb.next_global_index - 1 } - global_index)
   |> result.replace_error(
@@ -544,13 +550,13 @@ pub fn add_export(
   Ok(ModuleBuilder(..mb, exports: [export, ..mb.exports]))
 }
 
-/// Add an instruction to the `FunctionBuilder`.
+/// Add an instruction to the `CodeBuilder`.
 ///
 /// Validates the stack contains the value types the instruction requires.
 pub fn add_instruction(
-  fb: FunctionBuilder,
+  fb: CodeBuilder,
   instr: Instruction,
-) -> Result(FunctionBuilder, String) {
+) -> Result(CodeBuilder, String) {
   use #(top_label, bottom_labels) <- result.try(case fb.label_stack {
     [] -> Error("Attempted to add instruction to ended function")
     [head, ..tail] -> Ok(#(head, tail))
@@ -564,7 +570,7 @@ pub fn add_instruction(
           list.length(fb.value_stack) - top_label.stack_limit,
         )
         |> list.fold(over: top_label.result, from: _, with: list.prepend)
-      Ok(FunctionBuilder(..fb, value_stack:))
+      Ok(CodeBuilder(..fb, value_stack:))
     }
     Nop -> Ok(fb)
     Block(block_type) | Loop(block_type) | If(block_type) -> {
@@ -577,7 +583,7 @@ pub fn add_instruction(
         Loop(_) -> Ok(#(fb, LabelLoop))
         _ -> pop_push(fb, [I32], []) |> result.map(fn(fb) { #(fb, LabelIf) })
       })
-      FunctionBuilder(
+      CodeBuilder(
         ..fb,
         label_stack: [
           label_maker(list.length(fb.value_stack), result),
@@ -592,7 +598,7 @@ pub fn add_instruction(
       })
       check_stack_top_exact(fb, top_label.result)
       |> result.map(fn(fb) {
-        FunctionBuilder(
+        CodeBuilder(
           ..fb,
           value_stack: list.drop(fb.value_stack, list.length(top_label.result)),
           label_stack: [new_label, ..bottom_labels],
@@ -653,13 +659,13 @@ pub fn add_instruction(
         _ -> Ok(fb)
       }
       |> result.try(check_stack_top_exact(_, top_label.result))
-      |> result.map(fn(fb) { FunctionBuilder(..fb, label_stack: bottom_labels) })
+      |> result.map(fn(fb) { CodeBuilder(..fb, label_stack: bottom_labels) })
     }
     Drop ->
       case list.length(fb.value_stack) < top_label.stack_limit + 1 {
         True -> Error("Too few values on the stack")
         False ->
-          Ok(FunctionBuilder(..fb, value_stack: list.drop(fb.value_stack, 1)))
+          Ok(CodeBuilder(..fb, value_stack: list.drop(fb.value_stack, 1)))
       }
     Select(_maybe_types) -> todo
     RefNull(heap_type) -> pop_push(fb, [], [Ref(Nullable(heap_type))])
@@ -874,10 +880,10 @@ pub fn add_instruction(
     F64Add | F64Sub | F64Mul | F64Div | F64Min | F64Max | F64CopySign ->
       pop_push(fb, [F64, F64], [F64])
   }
-  |> result.map(fn(fb) { FunctionBuilder(..fb, code: [instr, ..fb.code]) })
+  |> result.map(fn(fb) { CodeBuilder(..fb, code: [instr, ..fb.code]) })
 }
 
-fn get_local(fb: FunctionBuilder, local_index: Int) -> Result(ValueType, String) {
+fn get_local(fb: CodeBuilder, local_index: Int) -> Result(ValueType, String) {
   let n_params = list.length(fb.params)
   // params are considered locals too
   case n_params > local_index {
@@ -897,10 +903,10 @@ fn get_local(fb: FunctionBuilder, local_index: Int) -> Result(ValueType, String)
   )
 }
 
-fn pop_push(fb: FunctionBuilder, pop, push) {
+fn pop_push(fb: CodeBuilder, pop, push) {
   check_stack_top(fb, pop)
   |> result.map(fn(fb) {
-    FunctionBuilder(
+    CodeBuilder(
       ..fb,
       value_stack: list.append(
         push,
@@ -911,9 +917,9 @@ fn pop_push(fb: FunctionBuilder, pop, push) {
 }
 
 fn check_stack_top_exact(
-  fb: FunctionBuilder,
+  fb: CodeBuilder,
   expected: List(ValueType),
-) -> Result(FunctionBuilder, String) {
+) -> Result(CodeBuilder, String) {
   use stack <- result.try(available_stack(fb))
   case list.length(stack) > list.length(expected) {
     True -> Error("Too many values on the stack")
@@ -923,16 +929,16 @@ fn check_stack_top_exact(
 }
 
 fn check_stack_top(
-  fb: FunctionBuilder,
+  fb: CodeBuilder,
   expected: List(ValueType),
-) -> Result(FunctionBuilder, String) {
+) -> Result(CodeBuilder, String) {
   use stack <- result.try(available_stack(fb))
   check_stack_top_loop(fb, stack, expected, 0)
   |> result.replace(fb)
 }
 
 fn check_stack_top_loop(
-  fb: FunctionBuilder,
+  fb: CodeBuilder,
   stack: List(ValueType),
   expected: List(ValueType),
   depth: Int,
@@ -958,7 +964,7 @@ fn check_stack_top_loop(
 }
 
 fn value_type_subtype_of(
-  fb: FunctionBuilder,
+  fb: CodeBuilder,
   is sub: ValueType,
   of sup: ValueType,
 ) -> Bool {
@@ -973,7 +979,7 @@ fn value_type_subtype_of(
 }
 
 fn heap_type_subtype_of(
-  fb: FunctionBuilder,
+  fb: CodeBuilder,
   is sub: HeapType,
   of sup: HeapType,
 ) -> Bool {
@@ -1042,7 +1048,7 @@ fn is_func(t: CompositeType) -> Bool {
   }
 }
 
-fn stack_top(fb: FunctionBuilder) -> Result(ValueType, String) {
+fn stack_top(fb: CodeBuilder) -> Result(ValueType, String) {
   use stack <- result.try(available_stack(fb))
   case stack {
     [] -> Error("Too few values on the stack")
@@ -1050,14 +1056,14 @@ fn stack_top(fb: FunctionBuilder) -> Result(ValueType, String) {
   }
 }
 
-fn top_label(fb: FunctionBuilder) -> Result(Label, String) {
+fn top_label(fb: CodeBuilder) -> Result(Label, String) {
   case fb.label_stack {
     [top_label, ..] -> Ok(top_label)
     [] -> Error("Label stack is empty")
   }
 }
 
-fn available_stack(fb: FunctionBuilder) -> Result(List(ValueType), String) {
+fn available_stack(fb: CodeBuilder) -> Result(List(ValueType), String) {
   use top_label <- result.map(top_label(fb))
   list.take(fb.value_stack, list.length(fb.value_stack) - top_label.stack_limit)
 }
@@ -1119,15 +1125,15 @@ fn heap_type_to_string(t: HeapType) {
   }
 }
 
-/// Add a local to the `FunctionBuilder`.
+/// Add a local to the `CodeBuilder`.
 ///
 /// Can be done any time before the local is used.
 pub fn add_local(
-  fb: FunctionBuilder,
+  fb: CodeBuilder,
   t: ValueType,
-) -> Result(#(FunctionBuilder, Int), String) {
+) -> Result(#(CodeBuilder, Int), String) {
   Ok(#(
-    FunctionBuilder(
+    CodeBuilder(
       ..fb,
       locals: [t, ..fb.locals],
       next_local_index: fb.next_local_index + 1,
@@ -1136,57 +1142,51 @@ pub fn add_local(
   ))
 }
 
-/// Complete the `FunctionBuilder` and replace the corresponding placeholder in
+/// Complete the `CodeBuilder` and replace the corresponding placeholder in
 /// `ModuleBuilder` by the validated function code.
 pub fn finalize_function(
   mb: ModuleBuilder,
-  fb: FunctionBuilder,
+  fb: CodeBuilder,
 ) -> Result(ModuleBuilder, String) {
-  case fb.label_stack {
-    [] ->
+  case fb.builds, fb.label_stack {
+    BuildFunction(function_index:, type_index:), [] ->
       list_replace(
         mb.functions,
-        mb.next_function_index - fb.function_index - 1,
+        mb.next_function_index - function_index - 1,
         FunctionImplementation(
-          fb.type_index,
+          type_index,
           list.reverse(fb.locals),
           list.reverse(fb.code),
         ),
       )
       |> result.replace_error(
-        "No function at index " <> int.to_string(fb.function_index),
+        "No function at index " <> int.to_string(function_index),
       )
       |> result.map(fn(functions) { ModuleBuilder(..mb, functions:) })
-    _ -> Error("Function incomplete")
+    BuildFunction(..), _ -> Error("Function incomplete")
+    _, _ -> Error("CodeBuilder does not build a function")
   }
 }
 
-/// Complete the `FunctionBuilder` and replace the corresponding placeholder in
+/// Complete the `CodeBuilder` and replace the corresponding placeholder in
 /// `ModuleBuilder` by the validated global initalization code.
 pub fn finalize_global(
   mb: ModuleBuilder,
-  fb: FunctionBuilder,
+  fb: CodeBuilder,
 ) -> Result(ModuleBuilder, String) {
-  let index = { mb.next_global_index - fb.function_index } - 1
-  case fb.label_stack {
-    [] ->
-      list_index(mb.globals, index)
-      |> result.try(fn(placeholder) {
-        list_replace(
-          mb.globals,
-          index,
-          GlobalInitialization(
-            placeholder.mutable,
-            placeholder.value_type,
-            list.reverse(fb.code),
-          ),
-        )
-      })
+  case fb.builds, fb.label_stack {
+    BuildGlobal(global_index:, mutable:, value_type:), [] ->
+      list_replace(
+        mb.globals,
+        mb.next_global_index - global_index - 1,
+        GlobalInitialization(mutable:, value_type:, code: list.reverse(fb.code)),
+      )
       |> result.replace_error(
-        "No global at index " <> int.to_string(fb.function_index),
+        "No global at index " <> int.to_string(global_index),
       )
       |> result.map(fn(globals) { ModuleBuilder(..mb, globals:) })
-    _ -> Error("Initializer incomplete")
+    BuildGlobal(..), _ -> Error("Initializer incomplete")
+    _, _ -> Error("CodeBuilder does not build a global")
   }
 }
 

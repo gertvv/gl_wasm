@@ -10,7 +10,7 @@ fn simple_func(params, result, code) {
   list.try_fold(code, fb, wasm.add_instruction)
 }
 
-fn simple_finalize(fb: wasm.FunctionBuilder) {
+fn simple_finalize(fb: wasm.CodeBuilder) {
   wasm.finalize_function(fb.module_builder, fb)
   |> result.try(fn(mb) {
     list.first(mb.functions) |> result.replace_error("No functions")
