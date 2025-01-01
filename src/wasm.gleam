@@ -17,7 +17,7 @@ import simplifile
 // --------------------------------------------------------------------------- 
 
 /// Builder to enable incremental construction of a module.
-pub type ModuleBuilder {
+pub opaque type ModuleBuilder {
   ModuleBuilder(
     output_file_path: String,
     /// type groups stored in reverse order
@@ -35,7 +35,7 @@ pub type ModuleBuilder {
 }
 
 /// Builder to enable incremental construction of a function or expression.
-pub type CodeBuilder {
+pub opaque type CodeBuilder {
   CodeBuilder(
     module_builder: ModuleBuilder,
     builds: BuildType,
@@ -151,7 +151,7 @@ pub type PackedType {
 }
 
 /// Labels keep track of the scope (block/frame).
-pub type Label {
+type Label {
   LabelInitializer(stack_limit: Int, result: List(ValueType))
   LabelFunc(stack_limit: Int, result: List(ValueType))
   LabelBlock(stack_limit: Int, result: List(ValueType))
@@ -355,7 +355,8 @@ pub fn create_module_builder(output_file_path: String) -> ModuleBuilder {
   )
 }
 
-fn get_type_by_index(
+/// Get a type definition by index.
+pub fn get_type_by_index(
   mb: ModuleBuilder,
   index: Int,
 ) -> Result(CompositeType, String) {
@@ -521,11 +522,7 @@ fn get_function(
   fb: CodeBuilder,
   function_index: Int,
 ) -> Result(FunctionDefinition, String) {
-  let mb = fb.module_builder
-  list_index(mb.functions, mb.next_function_index - function_index - 1)
-  |> result.replace_error(
-    "Function index " <> int.to_string(function_index) <> " does not exist",
-  )
+  get_function_by_index(fb.module_builder, function_index)
 }
 
 /// Add a global to the `ModuleBuilder`.
@@ -572,13 +569,11 @@ fn create_code_builder(module_builder, builds, params, result) -> CodeBuilder {
   )
 }
 
-fn get_global(fb: CodeBuilder, global_index: Int) -> Result(ValueType, String) {
-  let mb = fb.module_builder
-  list_index(mb.globals, { mb.next_global_index - 1 } - global_index)
-  |> result.replace_error(
-    "Global index " <> int.to_string(global_index) <> " does not exist",
-  )
-  |> result.map(fn(global) { global.value_type })
+fn get_global(
+  fb: CodeBuilder,
+  global_index: Int,
+) -> Result(GlobalDefinition, String) {
+  get_global_by_index(fb.module_builder, global_index)
 }
 
 /// Mark something for export.
@@ -597,9 +592,43 @@ pub fn add_instruction(
   fb: CodeBuilder,
   instr: Instruction,
 ) -> Result(CodeBuilder, String) {
+  // Retrieve the top label
   use #(top_label, bottom_labels) <- result.try(case fb.label_stack {
     [] -> Error("Attempted to add instruction to ended function")
     [head, ..tail] -> Ok(#(head, tail))
+  })
+  // If we're building a global initializer, check that the expression is
+  // constant.
+  use _ <- result.try(case fb.builds {
+    BuildFunction(_, _) -> Ok(Nil)
+    BuildGlobal(global_index, _, _) -> {
+      case instr {
+        // TODO: RefI31, ArrayNew, ArrayNewDefault, ArrayNewFixed, AnyConvertExtern, ExternConvertAny
+        I32Const(_)
+        | I64Const(_)
+        | F32Const(_)
+        | F64Const(_)
+        | RefNull(_)
+        | RefFunc(_)
+        | StructNew(_)
+        | StructNewDefault(_)
+        | End -> Ok(Nil)
+        GlobalGet(index) -> {
+          case index < global_index, get_global(fb, index) {
+            True, Ok(global) if global.mutable == Immutable -> Ok(Nil)
+            False, _ ->
+              Error("Global initializers may only get preceding globals")
+            _, Error(_) ->
+              Error(
+                "Global index " <> int.to_string(index) <> " does not exist",
+              )
+            _, Ok(_) -> Error("Global initializers may only get const globals")
+          }
+        }
+        _ ->
+          Error("Only constant expressions are allowed in global initializers")
+      }
+    }
   })
   case instr {
     Unreachable -> {
@@ -845,10 +874,10 @@ pub fn add_instruction(
       |> result.try(fn(t) { pop_push(fb, [t], [t]) })
     GlobalGet(global_index) ->
       get_global(fb, global_index)
-      |> result.try(fn(t) { pop_push(fb, [], [t]) })
+      |> result.try(fn(g) { pop_push(fb, [], [g.value_type]) })
     GlobalSet(global_index) ->
       get_global(fb, global_index)
-      |> result.try(fn(t) { pop_push(fb, [t], []) })
+      |> result.try(fn(g) { pop_push(fb, [g.value_type], []) })
     I32Const(_) -> pop_push(fb, [], [I32])
     I64Const(_) -> pop_push(fb, [], [I64])
     F32Const(_) -> pop_push(fb, [], [F32])
@@ -1228,6 +1257,33 @@ pub fn finalize_global(
     BuildGlobal(..), _ -> Error("Initializer incomplete")
     _, _ -> Error("CodeBuilder does not build a global")
   }
+}
+
+/// Get the build type for a CodeBuilder.
+pub fn builds(cb: CodeBuilder) -> BuildType {
+  cb.builds
+}
+
+/// Get a function definition by index.
+pub fn get_function_by_index(
+  mb: ModuleBuilder,
+  function_index: Int,
+) -> Result(FunctionDefinition, String) {
+  list_index(mb.functions, mb.next_function_index - function_index - 1)
+  |> result.replace_error(
+    "Function index " <> int.to_string(function_index) <> " does not exist",
+  )
+}
+
+/// Get a global definition by index.
+pub fn get_global_by_index(
+  mb: ModuleBuilder,
+  global_index: Int,
+) -> Result(GlobalDefinition, String) {
+  list_index(mb.globals, { mb.next_global_index - 1 } - global_index)
+  |> result.replace_error(
+    "Global index " <> int.to_string(global_index) <> " does not exist",
+  )
 }
 
 /// Set the start function by index. It must take no arguments and produce no

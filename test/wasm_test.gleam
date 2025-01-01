@@ -7,21 +7,23 @@ import wasm
 fn simple_func(params, result, code) {
   let mb = wasm.create_module_builder("foo.wasm")
   use #(mb, _) <- result.try(wasm.add_type(mb, wasm.Func(params, result)))
-  use #(_, fb) <- result.try(wasm.create_function_builder(mb, 0))
+  use #(mb, fb) <- result.try(wasm.create_function_builder(mb, 0))
   list.try_fold(code, fb, wasm.add_instruction)
+  |> result.map(fn(fb) { #(mb, fb) })
 }
 
-fn simple_finalize(fb: wasm.CodeBuilder) {
-  wasm.finalize_function(fb.module_builder, fb)
-  |> result.try(fn(mb) {
-    list.first(mb.functions) |> result.replace_error("No functions")
-  })
+fn simple_finalize(builders: #(wasm.ModuleBuilder, wasm.CodeBuilder)) {
+  let #(mb, fb) = builders
+  let assert wasm.BuildFunction(function_index:, ..) = wasm.builds(fb)
+  wasm.finalize_function(mb, fb)
+  |> result.try(wasm.get_function_by_index(_, function_index))
 }
 
 fn prepared_func(mb: wasm.ModuleBuilder, params, result, code) {
   use #(mb, tidx) <- result.try(wasm.add_type(mb, wasm.Func(params, result)))
-  use #(_, fb) <- result.try(wasm.create_function_builder(mb, tidx))
+  use #(mb, fb) <- result.try(wasm.create_function_builder(mb, tidx))
   list.try_fold(code, fb, wasm.add_instruction)
+  |> result.map(fn(fb) { #(mb, fb) })
 }
 
 pub fn return_const_test() {
@@ -231,7 +233,8 @@ pub fn else_incorrect_type_test() {
 }
 
 pub fn add_local_test() {
-  let assert Ok(fb) = simple_func([wasm.I64], [wasm.I64], [wasm.LocalGet(0)])
+  let assert Ok(#(_mb, fb)) =
+    simple_func([wasm.I64], [wasm.I64], [wasm.LocalGet(0)])
   let assert Ok(#(fb, 1)) = wasm.add_local(fb, wasm.I64)
   wasm.add_instruction(fb, wasm.LocalSet(1))
   |> should.be_ok
@@ -246,6 +249,18 @@ pub fn add_global_test() {
   let assert Ok(mb) = wasm.finalize_global(mb, gb)
   prepared_func(mb, [], [], [wasm.GlobalGet(0)])
   |> should.be_ok
+}
+
+pub fn add_global_non_const_expr_test() {
+  let mb = wasm.create_module_builder("foo.wasm")
+  let assert Ok(#(_mb, gb)) =
+    wasm.create_global_builder(mb, wasm.Mutable, wasm.I64)
+  let assert Ok(gb) = wasm.add_instruction(gb, wasm.I64Const(12))
+  let assert Ok(gb) = wasm.add_instruction(gb, wasm.I64Const(12))
+  wasm.add_instruction(gb, wasm.I64Add)
+  |> should.equal(Error(
+    "Only constant expressions are allowed in global initializers",
+  ))
 }
 
 pub fn return_null_struct_ref_test() {
@@ -416,14 +431,14 @@ pub fn func_call_test() {
   let assert Ok(#(mb, _)) =
     wasm.add_type(mb, wasm.Func([wasm.I64, wasm.F64], [wasm.F64]))
   let assert Ok(#(mb, _fb)) = wasm.create_function_builder(mb, 0)
-  let assert Ok(fb) =
+  let assert Ok(#(mb, fb)) =
     prepared_func(mb, [], [wasm.F64], [
       wasm.I64Const(42),
       wasm.F64Const(ieee_float.finite(3.14)),
       wasm.Call(0),
       wasm.End,
     ])
-  wasm.finalize_function(fb.module_builder, fb)
+  wasm.finalize_function(mb, fb)
   |> should.be_ok
 }
 
@@ -432,7 +447,7 @@ pub fn func_call_ref_test() {
   let assert Ok(#(mb, _)) =
     wasm.add_type(mb, wasm.Func([wasm.I64, wasm.F64], [wasm.F64]))
   let assert Ok(#(mb, _fb)) = wasm.create_function_builder(mb, 0)
-  let assert Ok(fb) =
+  let assert Ok(#(mb, fb)) =
     prepared_func(
       mb,
       [wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))],
@@ -445,7 +460,6 @@ pub fn func_call_ref_test() {
         wasm.End,
       ],
     )
-  wasm.finalize_function(fb.module_builder, fb)
+  wasm.finalize_function(mb, fb)
   |> should.be_ok
 }
-// TODO: test banned instructions in global initialization
