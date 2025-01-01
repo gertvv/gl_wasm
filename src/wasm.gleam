@@ -2,13 +2,6 @@
 ////
 //// WebAssembly types and instructions are represented by Gleam types and
 //// validation is performed as the WebAssembly is generated.
-////
-//// ## Example
-//// ```
-//// let mb = create_module_builder("out.wasm")
-//// ...
-//// ```
-//// Runs a simple example. To be removed.
 
 import gleam/bit_array
 import gleam/int
@@ -406,21 +399,34 @@ fn list_replace(lst: List(a), idx: Int, val: a) -> Result(List(a), Nil) {
   }
 }
 
+/// Adds a type to the module.
+///
+/// Can be done any time before creating a function that uses it.
+pub fn add_type(
+  mb: ModuleBuilder,
+  t: CompositeType,
+) -> Result(#(ModuleBuilder, Int), String) {
+  use #(mb, indices) <- result.map(add_type_group(mb, [t]))
+  let assert [index] = indices
+  #(mb, index)
+}
+
 /// Adds a type recursion group to the module.
 ///
 /// Can be done any time before creating a function that uses it.
 pub fn add_type_group(
   mb: ModuleBuilder,
   group: List(CompositeType),
-) -> Result(ModuleBuilder, String) {
+) -> Result(#(ModuleBuilder, List(Int)), String) {
   // TODO: validation
-  Ok(
+  Ok(#(
     ModuleBuilder(
       ..mb,
       types: [group, ..mb.types],
       next_type_index: mb.next_type_index + list.length(group),
     ),
-  )
+    list.range(mb.next_type_index, mb.next_type_index + list.length(group) - 1),
+  ))
 }
 
 fn get_type(fb: CodeBuilder, type_index: Int) {
@@ -436,34 +442,59 @@ pub fn create_function_builder(
   mb: ModuleBuilder,
   type_index: Int,
 ) -> Result(#(ModuleBuilder, CodeBuilder), String) {
-  case get_type_by_index(mb, type_index) {
-    Ok(Func(params, result)) -> {
-      let module_builder =
+  use #(mb, builders) <- result.map(create_function_builders(mb, [type_index]))
+  let assert [fb] = builders
+  #(mb, fb)
+}
+
+/// Register function placeholders for a group of potentially mutually
+/// recursive functions in the `ModuleBuilder` and create a `CodeBuilder` for
+/// each.
+///
+/// Multiple function implementations can be generated in parallel, to be
+/// finalized into the `ModuleBuilder` when ready.
+pub fn create_function_builders(
+  mb: ModuleBuilder,
+  type_indices: List(Int),
+) -> Result(#(ModuleBuilder, List(CodeBuilder)), String) {
+  // Resolve the types and ensure they are func
+  use signatures <- result.map(
+    list.try_map(type_indices, fn(type_index) {
+      get_type_by_index(mb, type_index)
+      |> result.try(fn(t) {
+        case t {
+          Func(params, result) -> Ok(#(type_index, params, result))
+          _ -> Error("Type $" <> int.to_string(type_index) <> " is not a func")
+        }
+      })
+    }),
+  )
+  // Pre-register the functions
+  let #(mb, funcs) =
+    list.map_fold(signatures, mb, fn(mb, signature) {
+      let #(type_index, params, result) = signature
+      let function_index = mb.next_function_index
+      #(
         ModuleBuilder(
           ..mb,
           functions: [FunctionMissing(type_index), ..mb.functions],
-          next_function_index: mb.next_function_index + 1,
-        )
-      Ok(#(
-        module_builder,
-        CodeBuilder(
-          module_builder:,
-          builds: BuildFunction(
-            function_index: mb.next_function_index,
-            type_index:,
-          ),
-          params:,
-          result:,
-          locals: [],
-          next_local_index: list.length(params),
-          code: [],
-          value_stack: [],
-          label_stack: [LabelFunc(0, result)],
+          next_function_index: function_index + 1,
         ),
-      ))
-    }
-    _ -> Error("Type $" <> int.to_string(type_index) <> " is not a func")
-  }
+        #(function_index, type_index, params, result),
+      )
+    })
+  // Create the builders, aware of all functions in the group
+  let builders =
+    list.map(funcs, fn(func) {
+      let #(function_index, type_index, params, result) = func
+      create_code_builder(
+        mb,
+        BuildFunction(function_index:, type_index:),
+        params,
+        result,
+      )
+    })
+  #(mb, builders)
 }
 
 /// Import a function.
@@ -514,22 +545,31 @@ pub fn create_global_builder(
     )
   Ok(#(
     module_builder,
-    CodeBuilder(
-      module_builder:,
-      builds: BuildGlobal(
-        global_index: mb.next_global_index,
-        mutable:,
-        value_type:,
-      ),
-      params: [],
-      result: [value_type],
-      locals: [],
-      next_local_index: 0,
-      code: [],
-      value_stack: [],
-      label_stack: [LabelInitializer(0, [value_type])],
+    create_code_builder(
+      module_builder,
+      BuildGlobal(global_index: mb.next_global_index, mutable:, value_type:),
+      [],
+      [value_type],
     ),
   ))
+}
+
+fn create_code_builder(module_builder, builds, params, result) -> CodeBuilder {
+  let top_label = case builds {
+    BuildFunction(..) -> LabelFunc(0, result)
+    BuildGlobal(..) -> LabelInitializer(0, result)
+  }
+  CodeBuilder(
+    module_builder:,
+    builds:,
+    params:,
+    result:,
+    locals: [],
+    next_local_index: list.length(params),
+    code: [],
+    value_stack: [],
+    label_stack: [top_label],
+  )
 }
 
 fn get_global(fb: CodeBuilder, global_index: Int) -> Result(ValueType, String) {
@@ -638,8 +678,8 @@ pub fn add_instruction(
       |> result.try(fn(t) {
         let assert Func(params, result) = t
         let to_pop = case is_ref {
-          False -> params
-          True -> [Ref(NonNull(ConcreteType(index))), ..params]
+          False -> list.reverse(params)
+          True -> [Ref(NonNull(ConcreteType(index))), ..list.reverse(params)]
         }
         pop_push(fb, to_pop, result)
       })
@@ -764,7 +804,7 @@ pub fn add_instruction(
         }
       })
       |> result.try(fn(t) {
-        pop_push(fb, [Ref(NonNull(ConcreteType(type_index)))], [t])
+        pop_push(fb, [Ref(Nullable(ConcreteType(type_index)))], [t])
       })
     }
     StructSet(type_index, field_index) ->
@@ -792,7 +832,7 @@ pub fn add_instruction(
         }
       })
       |> result.try(fn(t) {
-        pop_push(fb, [t, Ref(NonNull(ConcreteType(type_index)))], [])
+        pop_push(fb, [t, Ref(Nullable(ConcreteType(type_index)))], [])
       })
     LocalGet(local_index) ->
       get_local(fb, local_index)

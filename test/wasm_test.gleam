@@ -1,11 +1,12 @@
 import gleam/list
 import gleam/result
 import gleeunit/should
+import ieee_float
 import wasm
 
 fn simple_func(params, result, code) {
   let mb = wasm.create_module_builder("foo.wasm")
-  use mb <- result.try(wasm.add_type_group(mb, [wasm.Func(params, result)]))
+  use #(mb, _) <- result.try(wasm.add_type(mb, wasm.Func(params, result)))
   use #(_, fb) <- result.try(wasm.create_function_builder(mb, 0))
   list.try_fold(code, fb, wasm.add_instruction)
 }
@@ -18,8 +19,7 @@ fn simple_finalize(fb: wasm.CodeBuilder) {
 }
 
 fn prepared_func(mb: wasm.ModuleBuilder, params, result, code) {
-  let tidx = mb.next_type_index
-  use mb <- result.try(wasm.add_type_group(mb, [wasm.Func(params, result)]))
+  use #(mb, tidx) <- result.try(wasm.add_type(mb, wasm.Func(params, result)))
   use #(_, fb) <- result.try(wasm.create_function_builder(mb, tidx))
   list.try_fold(code, fb, wasm.add_instruction)
 }
@@ -250,10 +250,8 @@ pub fn add_global_test() {
 
 pub fn return_null_struct_ref_test() {
   let mb = wasm.create_module_builder("foo.wasm")
-  let assert Ok(mb) =
-    wasm.add_type_group(mb, [
-      wasm.Struct([wasm.ValueType(wasm.Immutable, wasm.I64)]),
-    ])
+  let assert Ok(#(mb, _)) =
+    wasm.add_type(mb, wasm.Struct([wasm.ValueType(wasm.Immutable, wasm.I64)]))
   let struct_ref = wasm.Ref(wasm.Nullable(wasm.ConcreteType(0)))
   prepared_func(mb, [], [struct_ref], [
     wasm.RefNull(wasm.ConcreteType(0)),
@@ -265,10 +263,8 @@ pub fn return_null_struct_ref_test() {
 
 pub fn return_incorrect_nullability_test() {
   let mb = wasm.create_module_builder("foo.wasm")
-  let assert Ok(mb) =
-    wasm.add_type_group(mb, [
-      wasm.Struct([wasm.ValueType(wasm.Immutable, wasm.I64)]),
-    ])
+  let assert Ok(#(mb, _)) =
+    wasm.add_type(mb, wasm.Struct([wasm.ValueType(wasm.Immutable, wasm.I64)]))
   let ref_nullable = wasm.Ref(wasm.Nullable(wasm.ConcreteType(0)))
   let ref_non_null = wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))
   prepared_func(mb, [ref_nullable], [ref_non_null], [wasm.LocalGet(0), wasm.End])
@@ -277,10 +273,8 @@ pub fn return_incorrect_nullability_test() {
 
 pub fn ref_as_non_null_test() {
   let mb = wasm.create_module_builder("foo.wasm")
-  let assert Ok(mb) =
-    wasm.add_type_group(mb, [
-      wasm.Struct([wasm.ValueType(wasm.Immutable, wasm.I64)]),
-    ])
+  let assert Ok(#(mb, _)) =
+    wasm.add_type(mb, wasm.Struct([wasm.ValueType(wasm.Immutable, wasm.I64)]))
   let ref_nullable = wasm.Ref(wasm.Nullable(wasm.ConcreteType(0)))
   let ref_non_null = wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))
   prepared_func(mb, [ref_nullable], [ref_non_null], [
@@ -293,13 +287,14 @@ pub fn ref_as_non_null_test() {
 
 pub fn struct_new_test() {
   let mb = wasm.create_module_builder("foo.wasm")
-  let assert Ok(mb) =
-    wasm.add_type_group(mb, [
+  let assert Ok(#(mb, _)) =
+    wasm.add_type(
+      mb,
       wasm.Struct([
         wasm.ValueType(wasm.Immutable, wasm.I32),
         wasm.ValueType(wasm.Immutable, wasm.I64),
       ]),
-    ])
+    )
   let ref_non_null = wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))
   prepared_func(mb, [], [ref_non_null], [
     wasm.I32Const(1),
@@ -312,8 +307,9 @@ pub fn struct_new_test() {
 
 pub fn struct_new_default_test() {
   let mb = wasm.create_module_builder("foo.wasm")
-  let assert Ok(mb) =
-    wasm.add_type_group(mb, [
+  let assert Ok(#(mb, _)) =
+    wasm.add_type(
+      mb,
       wasm.Struct([
         wasm.ValueType(wasm.Immutable, wasm.I32),
         wasm.ValueType(
@@ -321,7 +317,7 @@ pub fn struct_new_default_test() {
           wasm.Ref(wasm.Nullable(wasm.AbstractAny)),
         ),
       ]),
-    ])
+    )
   let ref_non_null = wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))
   prepared_func(mb, [], [ref_non_null], [wasm.StructNewDefault(0), wasm.End])
   |> should.be_ok
@@ -329,13 +325,14 @@ pub fn struct_new_default_test() {
 
 pub fn struct_new_non_defaultable_test() {
   let mb = wasm.create_module_builder("foo.wasm")
-  let assert Ok(mb) =
-    wasm.add_type_group(mb, [
+  let assert Ok(#(mb, _)) =
+    wasm.add_type(
+      mb,
       wasm.Struct([
         wasm.ValueType(wasm.Immutable, wasm.I32),
         wasm.ValueType(wasm.Immutable, wasm.Ref(wasm.NonNull(wasm.AbstractAny))),
       ]),
-    ])
+    )
   let ref_non_null = wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))
   prepared_func(mb, [], [ref_non_null], [wasm.StructNewDefault(0)])
   |> should.equal(Error("Struct type $0 has non-defaultable fields"))
@@ -343,16 +340,15 @@ pub fn struct_new_non_defaultable_test() {
 
 pub fn struct_new_with_subtype_test() {
   let mb = wasm.create_module_builder("foo.wasm")
-  let assert Ok(mb) =
-    wasm.add_type_group(mb, [
-      wasm.Struct([wasm.ValueType(wasm.Immutable, wasm.I64)]),
-    ])
-  let assert Ok(mb) =
-    wasm.add_type_group(mb, [
+  let assert Ok(#(mb, _)) =
+    wasm.add_type(mb, wasm.Struct([wasm.ValueType(wasm.Immutable, wasm.I64)]))
+  let assert Ok(#(mb, _)) =
+    wasm.add_type(
+      mb,
       wasm.Struct([
         wasm.ValueType(wasm.Immutable, wasm.Ref(wasm.NonNull(wasm.AbstractAny))),
       ]),
-    ])
+    )
   let ref_non_null = wasm.Ref(wasm.NonNull(wasm.ConcreteType(1)))
   prepared_func(mb, [], [ref_non_null], [
     wasm.StructNewDefault(0),
@@ -364,12 +360,10 @@ pub fn struct_new_with_subtype_test() {
 
 pub fn struct_get_test() {
   let mb = wasm.create_module_builder("foo.wasm")
-  let assert Ok(mb) =
-    wasm.add_type_group(mb, [
-      wasm.Struct([wasm.ValueType(wasm.Immutable, wasm.I64)]),
-    ])
-  let ref_non_null = wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))
-  prepared_func(mb, [ref_non_null], [wasm.I64], [
+  let assert Ok(#(mb, _)) =
+    wasm.add_type(mb, wasm.Struct([wasm.ValueType(wasm.Immutable, wasm.I64)]))
+  let ref_nullable = wasm.Ref(wasm.Nullable(wasm.ConcreteType(0)))
+  prepared_func(mb, [ref_nullable], [wasm.I64], [
     wasm.LocalGet(0),
     wasm.StructGet(0, 0),
     wasm.End,
@@ -378,12 +372,21 @@ pub fn struct_get_test() {
   |> should.be_ok
 }
 
+pub fn struct_get_non_struct_test() {
+  let mb = wasm.create_module_builder("foo.wasm")
+  let assert Ok(#(mb, _)) =
+    wasm.add_type(mb, wasm.Struct([wasm.ValueType(wasm.Immutable, wasm.I64)]))
+  prepared_func(mb, [wasm.I64], [wasm.I64], [
+    wasm.LocalGet(0),
+    wasm.StructGet(0, 0),
+  ])
+  |> should.equal(Error("Expected (ref null $0) at depth 0 but got i64"))
+}
+
 pub fn struct_set_test() {
   let mb = wasm.create_module_builder("foo.wasm")
-  let assert Ok(mb) =
-    wasm.add_type_group(mb, [
-      wasm.Struct([wasm.ValueType(wasm.Mutable, wasm.I64)]),
-    ])
+  let assert Ok(#(mb, _)) =
+    wasm.add_type(mb, wasm.Struct([wasm.ValueType(wasm.Mutable, wasm.I64)]))
   let ref_non_null = wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))
   prepared_func(mb, [ref_non_null], [], [
     wasm.LocalGet(0),
@@ -394,5 +397,55 @@ pub fn struct_set_test() {
   |> result.try(simple_finalize)
   |> should.be_ok
 }
+
+pub fn struct_set_immutable_test() {
+  let mb = wasm.create_module_builder("foo.wasm")
+  let assert Ok(#(mb, _)) =
+    wasm.add_type(mb, wasm.Struct([wasm.ValueType(wasm.Immutable, wasm.I64)]))
+  let ref_non_null = wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))
+  prepared_func(mb, [ref_non_null], [], [
+    wasm.LocalGet(0),
+    wasm.I64Const(42),
+    wasm.StructSet(0, 0),
+  ])
+  |> should.equal(Error("struct.set on immutable field"))
+}
+
+pub fn func_call_test() {
+  let mb = wasm.create_module_builder("foo.wasm")
+  let assert Ok(#(mb, _)) =
+    wasm.add_type(mb, wasm.Func([wasm.I64, wasm.F64], [wasm.F64]))
+  let assert Ok(#(mb, _fb)) = wasm.create_function_builder(mb, 0)
+  let assert Ok(fb) =
+    prepared_func(mb, [], [wasm.F64], [
+      wasm.I64Const(42),
+      wasm.F64Const(ieee_float.finite(3.14)),
+      wasm.Call(0),
+      wasm.End,
+    ])
+  wasm.finalize_function(fb.module_builder, fb)
+  |> should.be_ok
+}
+
+pub fn func_call_ref_test() {
+  let mb = wasm.create_module_builder("foo.wasm")
+  let assert Ok(#(mb, _)) =
+    wasm.add_type(mb, wasm.Func([wasm.I64, wasm.F64], [wasm.F64]))
+  let assert Ok(#(mb, _fb)) = wasm.create_function_builder(mb, 0)
+  let assert Ok(fb) =
+    prepared_func(
+      mb,
+      [wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))],
+      [wasm.F64],
+      [
+        wasm.I64Const(42),
+        wasm.F64Const(ieee_float.finite(3.14)),
+        wasm.LocalGet(0),
+        wasm.CallRef(0),
+        wasm.End,
+      ],
+    )
+  wasm.finalize_function(fb.module_builder, fb)
+  |> should.be_ok
+}
 // TODO: test banned instructions in global initialization
-// TODO: test function calls
