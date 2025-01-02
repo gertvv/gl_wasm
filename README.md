@@ -38,7 +38,7 @@ Create binary WebAssembly modules in Gleam.
  - [ ] Type validation
  - [ ] Type recursion and subtyping
  - [x] Global initialization
- - [ ] Validation for global initialization
+ - [x] Validation for global initialization
  - [ ] Advanced validation for break/return
  - [ ] Features related to unimplemented sections
  - [ ] Use bytes_tree instead of byte_array.concat & friends

@@ -877,7 +877,13 @@ pub fn add_instruction(
       |> result.try(fn(g) { pop_push(fb, [], [g.value_type]) })
     GlobalSet(global_index) ->
       get_global(fb, global_index)
-      |> result.try(fn(g) { pop_push(fb, [g.value_type], []) })
+      |> result.try(fn(g) {
+        case g.mutable {
+          Mutable -> Ok(g.value_type)
+          Immutable -> Error("global.set on an immutable global")
+        }
+      })
+      |> result.try(fn(t) { pop_push(fb, [t], []) })
     I32Const(_) -> pop_push(fb, [], [I32])
     I64Const(_) -> pop_push(fb, [], [I64])
     F32Const(_) -> pop_push(fb, [], [F32])
