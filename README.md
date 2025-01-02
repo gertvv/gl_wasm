@@ -99,9 +99,23 @@ pub fn main() {
   }
 }
 
+fn file_output_stream(fname) {
+  let output_stream =
+    wasm.OutputStream(
+      stream: fname,
+      write_bytes: fn(fname, bytes) {
+        simplifile.append_bits(fname, bytes)
+        |> result.replace(fname)
+      },
+      close: fn(fname) { Ok(fname) },
+    )
+  let _ = simplifile.write_bits(fname, <<>>)
+  output_stream
+}
+
 fn generate_wasm() {
-  // Create a ModuleBuilder that writes to the file "out.wasm"
-  let mb = wasm.create_module_builder("out.wasm")
+  // Create a ModuleBuilder
+  let mb = wasm.create_module_builder()
   // Register the "add" function type and import "math.add"
   use #(mb, type_index_add) <- result.try(wasm.add_type(
     mb,
@@ -130,7 +144,8 @@ fn generate_wasm() {
   // Export the "double" function
   use mb <- result.try(wasm.add_export(mb, wasm.ExportFunction("double", 1)))
   // Write the WebAssembly to file
-  wasm.emit_module(mb) |> result.replace_error("Error writing to file")
+  wasm.emit_module(mb, file_output_stream("out.wasm"))
+  |> result.replace_error("Error writing to file")
 }
 ```
 

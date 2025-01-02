@@ -10,16 +10,23 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleb128
 import ieee_float.{type IEEEFloat}
-import simplifile
 
 // --------------------------------------------------------------------------- 
 // Type definitions
 // --------------------------------------------------------------------------- 
 
+/// Output stream abstraction.
+pub type OutputStream(s, e) {
+  OutputStream(
+    stream: s,
+    write_bytes: fn(s, BitArray) -> Result(s, e),
+    close: fn(s) -> Result(s, e),
+  )
+}
+
 /// Builder to enable incremental construction of a module.
 pub opaque type ModuleBuilder {
   ModuleBuilder(
-    output_file_path: String,
     /// type groups stored in reverse order
     types: List(List(CompositeType)),
     next_type_index: Int,
@@ -337,13 +344,9 @@ pub type BlockType {
 // WebAssembly module & code builders
 // --------------------------------------------------------------------------- 
 
-/// Creates a ModuleBuilder that outputs to a specific file path.
-///
-/// In a future version, the file path will likely be replaced by an output
-/// stream abstraction.
-pub fn create_module_builder(output_file_path: String) -> ModuleBuilder {
+/// Creates a ModuleBuilder.
+pub fn create_module_builder() -> ModuleBuilder {
   ModuleBuilder(
-    output_file_path:,
     types: [],
     next_type_index: 0,
     functions: [],
@@ -1321,17 +1324,17 @@ pub fn set_start_function(
 /// Convert the WebAssembly to binary and output to file.
 ///
 /// Assumes the WebAssembly module is valid.
-pub fn emit_module(mb: ModuleBuilder) -> Result(Nil, simplifile.FileError) {
+pub fn emit_module(mb: ModuleBuilder, os: OutputStream(s, e)) -> Result(s, e) {
   // TODO: validation
 
   let header = <<0x00, 0x61, 0x73, 0x6d>>
   let version = <<0x01, 0x00, 0x00, 0x00>>
-  let _ = simplifile.write_bits("out.wasm", <<header:bits, version:bits>>)
+  use os <- result.try(write_bytes(os, <<header:bits, version:bits>>))
 
   // emit types
   let types = list.reverse(mb.types) |> list.map(encode_type_group)
-  use _ <- result.try(simplifile.append_bits(
-    "out.wasm",
+  use os <- result.try(write_bytes(
+    os,
     encode_section(section_type, encode_vector(types)),
   ))
 
@@ -1347,8 +1350,8 @@ pub fn emit_module(mb: ModuleBuilder) -> Result(Nil, simplifile.FileError) {
       }
     })
     |> list.map(encode_import)
-  use _ <- result.try(simplifile.append_bits(
-    "out.wasm",
+  use os <- result.try(write_bytes(
+    os,
     encode_section(section_import, encode_vector(func_imports)),
   ))
 
@@ -1363,8 +1366,8 @@ pub fn emit_module(mb: ModuleBuilder) -> Result(Nil, simplifile.FileError) {
         FunctionMissing(_) -> Error(Nil)
       }
     })
-  use _ <- result.try(simplifile.append_bits(
-    "out.wasm",
+  use os <- result.try(write_bytes(
+    os,
     encode_section(section_func, encode_vector(func_types)),
   ))
 
@@ -1382,8 +1385,8 @@ pub fn emit_module(mb: ModuleBuilder) -> Result(Nil, simplifile.FileError) {
         _ -> Error(Nil)
       }
     })
-  use _ <- result.try(simplifile.append_bits(
-    "out.wasm",
+  use os <- result.try(write_bytes(
+    os,
     encode_section(section_global, encode_vector(globals)),
   ))
 
@@ -1391,19 +1394,19 @@ pub fn emit_module(mb: ModuleBuilder) -> Result(Nil, simplifile.FileError) {
   let exports =
     list.reverse(mb.exports)
     |> list.map(encode_export)
-  use _ <- result.try(simplifile.append_bits(
-    "out.wasm",
+  use os <- result.try(write_bytes(
+    os,
     encode_section(section_export, encode_vector(exports)),
   ))
 
   // emit start section
-  use _ <- result.try(case mb.start_function_index {
+  use os <- result.try(case mb.start_function_index {
     Some(function_index) ->
-      simplifile.append_bits(
-        "out.wasm",
+      write_bytes(
+        os,
         encode_section(section_start, leb128_encode_unsigned(function_index)),
       )
-    None -> Ok(Nil)
+    None -> Ok(os)
   })
 
   // TODO: emit elements
@@ -1419,12 +1422,20 @@ pub fn emit_module(mb: ModuleBuilder) -> Result(Nil, simplifile.FileError) {
         FunctionMissing(_) -> Error(Nil)
       }
     })
-  use _ <- result.try(simplifile.append_bits(
-    "out.wasm",
+  use os <- result.try(write_bytes(
+    os,
     encode_section(section_code, encode_vector(func_codes)),
   ))
 
-  Ok(Nil)
+  Ok(os.stream)
+}
+
+fn write_bytes(
+  os: OutputStream(s, e),
+  bytes: BitArray,
+) -> Result(OutputStream(s, e), e) {
+  os.write_bytes(os.stream, bytes)
+  |> result.map(fn(stream) { OutputStream(..os, stream:) })
 }
 
 fn encode_section(section: Int, data: BitArray) {
