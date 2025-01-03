@@ -134,9 +134,9 @@ pub type HeapType {
 
 /// Composite types are those composed from simpler types.
 pub type CompositeType {
-  Func(List(ValueType), List(ValueType))
-  Array(FieldType)
-  Struct(List(FieldType))
+  Func(name: Option(String), params: List(ValueType), result: List(ValueType))
+  Array(name: Option(String), item_type: FieldType)
+  Struct(name: Option(String), field_types: List(FieldType))
 }
 
 /// Field types describe the components of aggregate types (arrays and
@@ -475,7 +475,7 @@ pub fn create_function_builders(
       get_type_by_index(mb, type_index)
       |> result.try(fn(t) {
         case t {
-          Func(params, result) -> Ok(#(type_index, name, params, result))
+          Func(params:, result:, ..) -> Ok(#(type_index, name, params, result))
           _ -> Error("Type $" <> int.to_string(type_index) <> " is not a func")
         }
       })
@@ -517,7 +517,7 @@ pub fn import_function(
   from: ImportSource,
 ) -> Result(ModuleBuilder, String) {
   case get_type_by_index(mb, type_index) {
-    Ok(Func(_, _)) -> {
+    Ok(Func(..)) -> {
       Ok(
         ModuleBuilder(
           ..mb,
@@ -717,7 +717,7 @@ pub fn add_instruction(
       }
       |> result.try(get_type(fb, _))
       |> result.try(fn(t) {
-        let assert Func(params, result) = t
+        let assert Func(params:, result:, ..) = t
         let to_pop = case is_ref {
           False -> list.reverse(params)
           True -> [Ref(NonNull(ConcreteType(index))), ..list.reverse(params)]
@@ -822,8 +822,8 @@ pub fn add_instruction(
       get_type(fb, type_index)
       |> result.try(fn(t) {
         case t {
-          Struct(fields) ->
-            list_index(fields, field_index)
+          Struct(field_types:, ..) ->
+            list_index(field_types, field_index)
             |> result.replace_error(
               "Struct type $"
               <> int.to_string(type_index)
@@ -852,8 +852,8 @@ pub fn add_instruction(
       get_type(fb, type_index)
       |> result.try(fn(t) {
         case t {
-          Struct(fields) ->
-            list_index(fields, field_index)
+          Struct(field_types:, ..) ->
+            list_index(field_types, field_index)
             |> result.replace_error(
               "Struct type $"
               <> int.to_string(type_index)
@@ -1116,21 +1116,21 @@ fn heap_type_subtype_of(
 
 fn is_array(t: CompositeType) -> Bool {
   case t {
-    Array(_) -> True
+    Array(..) -> True
     _ -> False
   }
 }
 
 fn is_struct(t: CompositeType) -> Bool {
   case t {
-    Struct(_) -> True
+    Struct(..) -> True
     _ -> False
   }
 }
 
 fn is_func(t: CompositeType) -> Bool {
   case t {
-    Func(_, _) -> True
+    Func(..) -> True
     _ -> False
   }
 }
@@ -1160,7 +1160,8 @@ fn unpack_struct_fields(
   type_index: Int,
 ) -> Result(List(ValueType), String) {
   case ct {
-    Struct(fields) -> Ok(list.map(fields, unpack_packed_field) |> list.reverse)
+    Struct(field_types:, ..) ->
+      Ok(list.map(field_types, unpack_packed_field) |> list.reverse)
     _ -> Error("Type $" <> int.to_string(type_index) <> " is not a struct")
   }
 }
@@ -1320,7 +1321,7 @@ pub fn set_start_function(
   get_type_by_index(mb, func.type_index)
   |> result.try(fn(fn_type) {
     case fn_type {
-      Func([], []) ->
+      Func(params: [], result: [], ..) ->
         Ok(ModuleBuilder(..mb, start_function_index: Some(function_index)))
       _ -> Error("Start function must be [] -> []")
     }
@@ -1565,13 +1566,16 @@ fn encode_type_group(ts: List(CompositeType)) -> BytesTree {
 
 fn encode_typedef(t: CompositeType) -> BytesTree {
   case t {
-    Array(element) -> [bt(code_type_array), encode_field_type(element)]
-    Func(params, results) -> [
+    Array(item_type:, ..) -> [bt(code_type_array), encode_field_type(item_type)]
+    Func(params:, result:, ..) -> [
       bt(code_type_func),
       encode_result_type(params),
-      encode_result_type(results),
+      encode_result_type(result),
     ]
-    Struct(fields) -> [bt(code_type_struct), encode_field_types(fields)]
+    Struct(field_types:, ..) -> [
+      bt(code_type_struct),
+      encode_field_types(field_types),
+    ]
   }
   |> bytes_tree.concat
 }
@@ -1948,16 +1952,28 @@ fn encode_names(mb: ModuleBuilder) -> BytesTree {
     list.index_map(list.reverse(mb.functions), fn(func, index) {
       #(index, func.name)
     })
-    |> list.filter_map(fn(func) {
-      let #(index, name) = func
-      case name {
-        None -> Error(Nil)
-        Some(name) -> Ok(#(index, name))
-      }
-    })
-  let function_names_data =
-    encode_name_assoc(names_subsection_function, function_names)
-  function_names_data
+    |> named_only
+    |> encode_name_assoc(names_subsection_function, _)
+
+  let type_names =
+    list.reverse(mb.types)
+    |> list.flatten
+    |> list.index_map(fn(t, index) { #(index, t.name) })
+    |> named_only
+    |> encode_name_assoc(names_subsection_type, _)
+
+  [function_names, type_names]
+  |> bytes_tree.concat
+}
+
+fn named_only(lst: List(#(Int, Option(String)))) -> List(#(Int, String)) {
+  list.filter_map(lst, fn(pair) {
+    let #(index, name) = pair
+    case name {
+      None -> Error(Nil)
+      Some(name) -> Ok(#(index, name))
+    }
+  })
 }
 
 fn encode_name_assoc(
