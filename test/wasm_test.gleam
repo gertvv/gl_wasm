@@ -19,7 +19,10 @@ fn memory_output_stream() {
 fn simple_func(params, result, code) {
   let mb = wasm.create_module_builder()
   use #(mb, _) <- result.try(wasm.add_type(mb, wasm.Func(None, params, result)))
-  use #(mb, fb) <- result.try(wasm.create_function_builder(mb, 0, None))
+  use #(mb, fb) <- result.try(wasm.create_function_builder(
+    mb,
+    wasm.FunctionSignature(0, None, None),
+  ))
   list.try_fold(code, fb, wasm.add_instruction)
   |> result.map(fn(fb) { #(mb, fb) })
 }
@@ -36,7 +39,10 @@ fn prepared_func(mb: wasm.ModuleBuilder, params, result, code) {
     mb,
     wasm.Func(None, params, result),
   ))
-  use #(mb, fb) <- result.try(wasm.create_function_builder(mb, tidx, None))
+  use #(mb, fb) <- result.try(wasm.create_function_builder(
+    mb,
+    wasm.FunctionSignature(tidx, None, None),
+  ))
   list.try_fold(code, fb, wasm.add_instruction)
   |> result.map(fn(fb) { #(mb, fb) })
 }
@@ -45,7 +51,9 @@ pub fn return_const_test() {
   simple_func([], [wasm.I64], [wasm.I64Const(42), wasm.End])
   |> result.try(simple_finalize)
   |> should.equal(
-    Ok(wasm.FunctionImplementation(0, None, [], [wasm.I64Const(42), wasm.End])),
+    Ok(
+      wasm.FunctionImplementation(0, None, [], [], [wasm.I64Const(42), wasm.End]),
+    ),
   )
 }
 
@@ -76,7 +84,7 @@ pub fn i64_add_test() {
   let code = [wasm.I64Const(41), wasm.I64Const(1), wasm.I64Add, wasm.End]
   simple_func([], [wasm.I64], code)
   |> result.try(simple_finalize)
-  |> should.equal(Ok(wasm.FunctionImplementation(0, None, [], code)))
+  |> should.equal(Ok(wasm.FunctionImplementation(0, None, [], [], code)))
 }
 
 pub fn i64_add_missing_arg_test() {
@@ -100,7 +108,7 @@ pub fn block_empty_test() {
   let code = [wasm.Block(wasm.BlockEmpty), wasm.End, wasm.End]
   simple_func([], [], code)
   |> result.try(simple_finalize)
-  |> should.equal(Ok(wasm.FunctionImplementation(0, None, [], code)))
+  |> should.equal(Ok(wasm.FunctionImplementation(0, None, [], [], code)))
 }
 
 pub fn block_too_many_values_test() {
@@ -121,7 +129,7 @@ pub fn block_result_test() {
   ]
   simple_func([], [wasm.I64], code)
   |> result.try(simple_finalize)
-  |> should.equal(Ok(wasm.FunctionImplementation(0, None, [], code)))
+  |> should.equal(Ok(wasm.FunctionImplementation(0, None, [], [], code)))
 }
 
 pub fn block_missing_result_test() {
@@ -133,7 +141,12 @@ pub fn local_get_test() {
   simple_func([wasm.I64], [wasm.I64], [wasm.LocalGet(0), wasm.End])
   |> result.try(simple_finalize)
   |> should.equal(
-    Ok(wasm.FunctionImplementation(0, None, [], [wasm.LocalGet(0), wasm.End])),
+    Ok(
+      wasm.FunctionImplementation(0, None, [None], [], [
+        wasm.LocalGet(0),
+        wasm.End,
+      ]),
+    ),
   )
 }
 
@@ -168,7 +181,7 @@ pub fn break_test() {
   ]
   simple_func([], [wasm.I64], code)
   |> result.try(simple_finalize)
-  |> should.equal(Ok(wasm.FunctionImplementation(0, None, [], code)))
+  |> should.equal(Ok(wasm.FunctionImplementation(0, None, [], [], code)))
 }
 
 pub fn break_if_test() {
@@ -186,7 +199,7 @@ pub fn break_if_test() {
   ]
   simple_func([wasm.I32], [wasm.I64], code)
   |> result.try(simple_finalize)
-  |> should.equal(Ok(wasm.FunctionImplementation(0, None, [], code)))
+  |> should.equal(Ok(wasm.FunctionImplementation(0, None, [None], [], code)))
 }
 
 pub fn operands_outside_frame_test() {
@@ -250,7 +263,7 @@ pub fn else_incorrect_type_test() {
 pub fn add_local_test() {
   let assert Ok(#(_mb, fb)) =
     simple_func([wasm.I64], [wasm.I64], [wasm.LocalGet(0)])
-  let assert Ok(#(fb, 1)) = wasm.add_local(fb, wasm.I64)
+  let assert Ok(#(fb, 1)) = wasm.add_local(fb, wasm.I64, None)
   wasm.add_instruction(fb, wasm.LocalSet(1))
   |> should.be_ok
 }
@@ -469,7 +482,8 @@ pub fn func_call_test() {
   let mb = wasm.create_module_builder()
   let assert Ok(#(mb, _)) =
     wasm.add_type(mb, wasm.Func(None, [wasm.I64, wasm.F64], [wasm.F64]))
-  let assert Ok(#(mb, _fb)) = wasm.create_function_builder(mb, 0, None)
+  let assert Ok(#(mb, _fb)) =
+    wasm.create_function_builder(mb, wasm.FunctionSignature(0, None, None))
   let assert Ok(#(mb, fb)) =
     prepared_func(mb, [], [wasm.F64], [
       wasm.I64Const(42),
@@ -485,7 +499,8 @@ pub fn func_call_ref_test() {
   let mb = wasm.create_module_builder()
   let assert Ok(#(mb, _)) =
     wasm.add_type(mb, wasm.Func(None, [wasm.I64, wasm.F64], [wasm.F64]))
-  let assert Ok(#(mb, _fb)) = wasm.create_function_builder(mb, 0, None)
+  let assert Ok(#(mb, _fb)) =
+    wasm.create_function_builder(mb, wasm.FunctionSignature(0, None, None))
   let assert Ok(#(mb, fb)) =
     prepared_func(
       mb,

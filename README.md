@@ -89,7 +89,9 @@ implement a "double" function which it exports.
 ```gleam
 import gleam/io
 import gleam/list
+import gleam/option.{Some}
 import gleam/result
+import simplifile
 import wasm
 
 pub fn main() {
@@ -114,26 +116,26 @@ fn file_output_stream(fname) {
 }
 
 fn generate_wasm() {
-  // Create a ModuleBuilder
+  // Create a ModuleBuilder that writes to the file "out.wasm"
   let mb = wasm.create_module_builder()
   // Register the "add" function type and import "math.add"
   use #(mb, type_index_add) <- result.try(wasm.add_type(
     mb,
-    wasm.Func([wasm.I64, wasm.I64], [wasm.I64]),
+    wasm.Func(Some("add_type"), [wasm.I64, wasm.I64], [wasm.I64]),
   ))
   use mb <- result.try(wasm.import_function(
     mb,
-    type_index_add,
+    wasm.FunctionSignature(type_index_add, Some("add"), Some(["n", "m"])),
     wasm.ImportSource("math", "add"),
   ))
   // Register the "double" function type and generate its code
   use #(mb, type_index_double) <- result.try(wasm.add_type(
     mb,
-    wasm.Func([wasm.I64], [wasm.I64]),
+    wasm.Func(Some("double_type"), [wasm.I64], [wasm.I64]),
   ))
   use #(mb, fb) <- result.try(wasm.create_function_builder(
     mb,
-    type_index_double,
+    wasm.FunctionSignature(type_index_double, Some("double"), Some(["n"])),
   ))
   use fb <- result.try(list.try_fold(
     over: [wasm.LocalGet(0), wasm.LocalGet(0), wasm.Call(0), wasm.End],
@@ -153,14 +155,14 @@ The disassembled WebAssembly Text (WAT) representation looks like this:
 
 ```
 (module
- (type $0 (func (param f64 f64) (result f64)))
- (type $1 (func (param f64) (result f64)))
- (import "math" "add" (func $fimport$0 (type $0) (param f64 f64) (result f64)))
- (export "double" (func $0))
- (func $0 (type $1) (param $0 f64) (result f64)
-  (call $fimport$0
-   (local.get $0)
-   (local.get $0)
+ (type $add_type (func (param f64 f64) (result f64)))
+ (type $double_type (func (param f64) (result f64)))
+ (import "math" "add" (func $add (type $add_type) (param f64 f64) (result f64)))
+ (export "double" (func $double))
+ (func $double (type $double_type) (param $n f64) (result f64)
+  (call $add
+   (local.get $n)
+   (local.get $n)
   )
  )
 )

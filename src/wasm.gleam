@@ -49,6 +49,7 @@ pub opaque type CodeBuilder {
     params: List(ValueType),
     result: List(ValueType),
     locals: List(ValueType),
+    local_names: List(Option(String)),
     next_local_index: Int,
     code: List(Instruction),
     value_stack: List(ValueType),
@@ -61,17 +62,35 @@ pub type BuildType {
   BuildGlobal(global_index: Int, mutable: Mutability, value_type: ValueType)
 }
 
+pub type FunctionSignature {
+  FunctionSignature(
+    type_index: Int,
+    name: Option(String),
+    param_names: Option(List(String)),
+  )
+}
+
 /// Functions can be defined via import or implementation. While they are being
 /// constructed the `FunctionMissing` placeholder is used.
 pub type FunctionDefinition {
-  FunctionImport(type_index: Int, name: Option(String), from: ImportSource)
+  FunctionImport(
+    type_index: Int,
+    name: Option(String),
+    local_names: List(Option(String)),
+    from: ImportSource,
+  )
   FunctionImplementation(
     type_index: Int,
     name: Option(String),
+    local_names: List(Option(String)),
     locals: List(ValueType),
     code: List(Instruction),
   )
-  FunctionMissing(type_index: Int, name: Option(String))
+  FunctionMissing(
+    type_index: Int,
+    name: Option(String),
+    local_names: List(Option(String)),
+  )
 }
 
 pub type GlobalDefinition {
@@ -445,12 +464,9 @@ fn get_type(fb: CodeBuilder, type_index: Int) {
 /// finalized into the `ModuleBuilder` when ready.
 pub fn create_function_builder(
   mb: ModuleBuilder,
-  type_index: Int,
-  name: Option(String),
+  signature: FunctionSignature,
 ) -> Result(#(ModuleBuilder, CodeBuilder), String) {
-  use #(mb, builders) <- result.map(
-    create_function_builders(mb, [type_index], [name]),
-  )
+  use #(mb, builders) <- result.map(create_function_builders(mb, [signature]))
   let assert [fb] = builders
   #(mb, fb)
 }
@@ -463,70 +479,109 @@ pub fn create_function_builder(
 /// finalized into the `ModuleBuilder` when ready.
 pub fn create_function_builders(
   mb: ModuleBuilder,
-  type_indices: List(Int),
-  names: List(Option(String)),
+  signatures: List(FunctionSignature),
 ) -> Result(#(ModuleBuilder, List(CodeBuilder)), String) {
   // Resolve the types and ensure they are func
-  use signatures <- result.map(
-    list.strict_zip(type_indices, names)
-    |> result.replace_error("type_indices and names must have equal length")
-    |> result.try(list.try_map(_, fn(func) {
-      let #(type_index, name) = func
-      get_type_by_index(mb, type_index)
+  use extended_signatures <- result.try(
+    list.try_map(signatures, fn(signature) {
+      get_type_by_index(mb, signature.type_index)
       |> result.try(fn(t) {
         case t {
-          Func(params:, result:, ..) -> Ok(#(type_index, name, params, result))
-          _ -> Error("Type $" <> int.to_string(type_index) <> " is not a func")
+          Func(params:, result:, ..) -> Ok(#(signature, params, result))
+          _ ->
+            Error(
+              "Type $"
+              <> int.to_string(signature.type_index)
+              <> " is not a func",
+            )
         }
       })
-    })),
+    }),
   )
   // Pre-register the functions
   let #(mb, funcs) =
-    list.map_fold(signatures, mb, fn(mb, signature) {
-      let #(type_index, name, params, result) = signature
+    list.map_fold(extended_signatures, mb, fn(mb, extended_signature) {
+      let #(signature, params, result) = extended_signature
       let function_index = mb.next_function_index
       #(
         ModuleBuilder(
           ..mb,
-          functions: [FunctionMissing(type_index, name), ..mb.functions],
+          functions: [
+            FunctionMissing(
+              signature.type_index,
+              signature.name,
+              option_deepen(signature.param_names, params),
+            ),
+            ..mb.functions
+          ],
           next_function_index: function_index + 1,
         ),
-        #(function_index, type_index, name, params, result),
+        #(function_index, signature, params, result),
       )
     })
   // Create the builders, aware of all functions in the group
-  let builders =
-    list.map(funcs, fn(func) {
-      let #(function_index, type_index, name, params, result) = func
-      create_code_builder(
-        mb,
-        BuildFunction(function_index:, type_index:, name:),
-        params,
-        result,
-      )
-    })
-  #(mb, builders)
+  list.try_map(funcs, fn(func) {
+    let #(
+      function_index,
+      FunctionSignature(type_index:, name:, param_names:),
+      params,
+      result,
+    ) = func
+    create_code_builder(
+      mb,
+      BuildFunction(function_index:, type_index:, name:),
+      params,
+      option_deepen(param_names, params),
+      result,
+    )
+  })
+  |> result.map(fn(builders) { #(mb, builders) })
+}
+
+fn option_deepen(
+  maybe_list: Option(List(a)),
+  ref_list: List(b),
+) -> List(Option(a)) {
+  case maybe_list {
+    None -> list.map(ref_list, fn(_) { None })
+    Some(items) -> list.map(items, Some)
+  }
 }
 
 /// Import a function.
 pub fn import_function(
   mb: ModuleBuilder,
-  type_index: Int,
-  name: Option(String),
+  signature: FunctionSignature,
   from: ImportSource,
 ) -> Result(ModuleBuilder, String) {
-  case get_type_by_index(mb, type_index) {
-    Ok(Func(..)) -> {
-      Ok(
+  case get_type_by_index(mb, signature.type_index) {
+    Ok(Func(params:, ..)) -> {
+      case signature.param_names {
+        None -> Ok(list.map(params, fn(_) { None }))
+        Some(param_names) ->
+          case list.length(params) == list.length(param_names) {
+            False -> Error("param_names must match lenght of function params")
+            True -> Ok(list.map(param_names, Some))
+          }
+      }
+      |> result.map(fn(local_names) {
         ModuleBuilder(
           ..mb,
-          functions: [FunctionImport(type_index, name, from), ..mb.functions],
+          functions: [
+            FunctionImport(
+              type_index: signature.type_index,
+              name: signature.name,
+              local_names:,
+              from:,
+            ),
+            ..mb.functions
+          ],
           next_function_index: mb.next_function_index + 1,
-        ),
-      )
+        )
+      })
     }
-    _ -> Error("Type $" <> int.to_string(type_index) <> " is not a func")
+    _ ->
+      Error("Type $" <> int.to_string(signature.type_index) <> " is not a func")
   }
 }
 
@@ -552,33 +607,45 @@ pub fn create_global_builder(
       globals: [global, ..mb.globals],
       next_global_index: mb.next_global_index + 1,
     )
-  Ok(#(
+  create_code_builder(
     module_builder,
-    create_code_builder(
-      module_builder,
-      BuildGlobal(global_index: mb.next_global_index, mutable:, value_type:),
-      [],
-      [value_type],
-    ),
-  ))
+    BuildGlobal(global_index: mb.next_global_index, mutable:, value_type:),
+    [],
+    [],
+    [value_type],
+  )
+  |> result.map(fn(builder) { #(module_builder, builder) })
 }
 
-fn create_code_builder(module_builder, builds, params, result) -> CodeBuilder {
+fn create_code_builder(
+  module_builder,
+  builds,
+  params,
+  param_names,
+  result,
+) -> Result(CodeBuilder, String) {
   let top_label = case builds {
     BuildFunction(..) -> LabelFunc(0, result)
     BuildGlobal(..) -> LabelInitializer(0, result)
   }
-  CodeBuilder(
-    module_builder:,
-    builds:,
-    params:,
-    result:,
-    locals: [],
-    next_local_index: list.length(params),
-    code: [],
-    value_stack: [],
-    label_stack: [top_label],
-  )
+  case list.length(params) == list.length(param_names) {
+    False -> Error("param_names must have same lenght as params")
+    True ->
+      Ok(
+        CodeBuilder(
+          module_builder:,
+          builds:,
+          params:,
+          result:,
+          locals: [],
+          local_names: list.reverse(param_names),
+          next_local_index: list.length(params),
+          code: [],
+          value_stack: [],
+          label_stack: [top_label],
+        ),
+      )
+  }
 }
 
 fn get_global(
@@ -1219,11 +1286,13 @@ fn heap_type_to_string(t: HeapType) {
 pub fn add_local(
   fb: CodeBuilder,
   t: ValueType,
+  name: Option(String),
 ) -> Result(#(CodeBuilder, Int), String) {
   Ok(#(
     CodeBuilder(
       ..fb,
       locals: [t, ..fb.locals],
+      local_names: [name, ..fb.local_names],
       next_local_index: fb.next_local_index + 1,
     ),
     fb.next_local_index,
@@ -1242,10 +1311,11 @@ pub fn finalize_function(
         mb.functions,
         mb.next_function_index - function_index - 1,
         FunctionImplementation(
-          type_index,
-          name,
-          list.reverse(fb.locals),
-          list.reverse(fb.code),
+          type_index:,
+          name:,
+          local_names: list.reverse(fb.local_names),
+          locals: list.reverse(fb.locals),
+          code: list.reverse(fb.code),
         ),
       )
       |> result.replace_error(
@@ -1953,16 +2023,38 @@ fn encode_names(mb: ModuleBuilder) -> BytesTree {
       #(index, func.name)
     })
     |> named_only
-    |> encode_name_assoc(names_subsection_function, _)
+    |> encode_name_map
+    |> prepend_byte_size
+    |> bytes_tree.prepend(names_subsection_function)
 
   let type_names =
     list.reverse(mb.types)
     |> list.flatten
     |> list.index_map(fn(t, index) { #(index, t.name) })
     |> named_only
-    |> encode_name_assoc(names_subsection_type, _)
+    |> encode_name_map
+    |> prepend_byte_size
+    |> bytes_tree.prepend(names_subsection_type)
 
-  [function_names, type_names]
+  let local_names =
+    list.reverse(mb.functions)
+    |> list.index_map(fn(func, index) {
+      let local_names =
+        list.index_map(func.local_names, fn(name, index) { #(index, name) })
+        |> named_only
+      #(index, local_names)
+    })
+    |> list.filter(fn(name_map) {
+      case name_map {
+        #(_, []) -> False
+        _ -> True
+      }
+    })
+    |> encode_indirect_name_map
+    |> prepend_byte_size
+    |> bytes_tree.prepend(names_subsection_local)
+
+  [function_names, local_names, type_names]
   |> bytes_tree.concat
 }
 
@@ -1976,10 +2068,7 @@ fn named_only(lst: List(#(Int, Option(String)))) -> List(#(Int, String)) {
   })
 }
 
-fn encode_name_assoc(
-  subsection_id: BitArray,
-  name_map: List(#(Int, String)),
-) -> BytesTree {
+fn encode_name_map(name_map: List(#(Int, String))) -> BytesTree {
   case name_map {
     [] -> bytes_tree.new()
     _ -> {
@@ -1991,9 +2080,24 @@ fn encode_name_assoc(
         )
       })
       |> encode_vector
-      |> prepend_byte_size
-      |> bytes_tree.prepend(subsection_id)
     }
+  }
+}
+
+fn encode_indirect_name_map(
+  indirect_name_map: List(#(Int, List(#(Int, String)))),
+) -> BytesTree {
+  case indirect_name_map {
+    [] -> bytes_tree.new()
+    _ ->
+      list.map(indirect_name_map, fn(indirect_assoc) {
+        let #(index, name_map) = indirect_assoc
+        bytes_tree.prepend(
+          prefix: leb128_encode_unsigned(index),
+          to: encode_name_map(name_map),
+        )
+      })
+      |> encode_vector
   }
 }
 
