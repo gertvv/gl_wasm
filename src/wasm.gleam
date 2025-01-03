@@ -3,7 +3,7 @@
 //// WebAssembly types and instructions are represented by Gleam types and
 //// validation is performed as the WebAssembly is generated.
 
-import gleam/bit_array
+import gleam/bytes_tree.{type BytesTree, from_bit_array as bt}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -57,20 +57,21 @@ pub opaque type CodeBuilder {
 }
 
 pub type BuildType {
-  BuildFunction(function_index: Int, type_index: Int)
+  BuildFunction(function_index: Int, type_index: Int, name: Option(String))
   BuildGlobal(global_index: Int, mutable: Mutability, value_type: ValueType)
 }
 
 /// Functions can be defined via import or implementation. While they are being
 /// constructed the `FunctionMissing` placeholder is used.
 pub type FunctionDefinition {
-  FunctionImport(type_index: Int, ImportSource)
+  FunctionImport(type_index: Int, name: Option(String), from: ImportSource)
   FunctionImplementation(
     type_index: Int,
+    name: Option(String),
     locals: List(ValueType),
     code: List(Instruction),
   )
-  FunctionMissing(type_index: Int)
+  FunctionMissing(type_index: Int, name: Option(String))
 }
 
 pub type GlobalDefinition {
@@ -445,8 +446,11 @@ fn get_type(fb: CodeBuilder, type_index: Int) {
 pub fn create_function_builder(
   mb: ModuleBuilder,
   type_index: Int,
+  name: Option(String),
 ) -> Result(#(ModuleBuilder, CodeBuilder), String) {
-  use #(mb, builders) <- result.map(create_function_builders(mb, [type_index]))
+  use #(mb, builders) <- result.map(
+    create_function_builders(mb, [type_index], [name]),
+  )
   let assert [fb] = builders
   #(mb, fb)
 }
@@ -460,40 +464,44 @@ pub fn create_function_builder(
 pub fn create_function_builders(
   mb: ModuleBuilder,
   type_indices: List(Int),
+  names: List(Option(String)),
 ) -> Result(#(ModuleBuilder, List(CodeBuilder)), String) {
   // Resolve the types and ensure they are func
   use signatures <- result.map(
-    list.try_map(type_indices, fn(type_index) {
+    list.strict_zip(type_indices, names)
+    |> result.replace_error("type_indices and names must have equal length")
+    |> result.try(list.try_map(_, fn(func) {
+      let #(type_index, name) = func
       get_type_by_index(mb, type_index)
       |> result.try(fn(t) {
         case t {
-          Func(params, result) -> Ok(#(type_index, params, result))
+          Func(params, result) -> Ok(#(type_index, name, params, result))
           _ -> Error("Type $" <> int.to_string(type_index) <> " is not a func")
         }
       })
-    }),
+    })),
   )
   // Pre-register the functions
   let #(mb, funcs) =
     list.map_fold(signatures, mb, fn(mb, signature) {
-      let #(type_index, params, result) = signature
+      let #(type_index, name, params, result) = signature
       let function_index = mb.next_function_index
       #(
         ModuleBuilder(
           ..mb,
-          functions: [FunctionMissing(type_index), ..mb.functions],
+          functions: [FunctionMissing(type_index, name), ..mb.functions],
           next_function_index: function_index + 1,
         ),
-        #(function_index, type_index, params, result),
+        #(function_index, type_index, name, params, result),
       )
     })
   // Create the builders, aware of all functions in the group
   let builders =
     list.map(funcs, fn(func) {
-      let #(function_index, type_index, params, result) = func
+      let #(function_index, type_index, name, params, result) = func
       create_code_builder(
         mb,
-        BuildFunction(function_index:, type_index:),
+        BuildFunction(function_index:, type_index:, name:),
         params,
         result,
       )
@@ -505,6 +513,7 @@ pub fn create_function_builders(
 pub fn import_function(
   mb: ModuleBuilder,
   type_index: Int,
+  name: Option(String),
   from: ImportSource,
 ) -> Result(ModuleBuilder, String) {
   case get_type_by_index(mb, type_index) {
@@ -512,7 +521,7 @@ pub fn import_function(
       Ok(
         ModuleBuilder(
           ..mb,
-          functions: [FunctionImport(type_index, from), ..mb.functions],
+          functions: [FunctionImport(type_index, name, from), ..mb.functions],
           next_function_index: mb.next_function_index + 1,
         ),
       )
@@ -603,8 +612,8 @@ pub fn add_instruction(
   // If we're building a global initializer, check that the expression is
   // constant.
   use _ <- result.try(case fb.builds {
-    BuildFunction(_, _) -> Ok(Nil)
-    BuildGlobal(global_index, _, _) -> {
+    BuildFunction(..) -> Ok(Nil)
+    BuildGlobal(global_index:, ..) -> {
       case instr {
         // TODO: RefI31, ArrayNew, ArrayNewDefault, ArrayNewFixed, AnyConvertExtern, ExternConvertAny
         I32Const(_)
@@ -1227,12 +1236,13 @@ pub fn finalize_function(
   fb: CodeBuilder,
 ) -> Result(ModuleBuilder, String) {
   case fb.builds, fb.label_stack {
-    BuildFunction(function_index:, type_index:), [] ->
+    BuildFunction(function_index:, type_index:, name:), [] ->
       list_replace(
         mb.functions,
         mb.next_function_index - function_index - 1,
         FunctionImplementation(
           type_index,
+          name,
           list.reverse(fb.locals),
           list.reverse(fb.code),
         ),
@@ -1329,7 +1339,7 @@ pub fn emit_module(mb: ModuleBuilder, os: OutputStream(s, e)) -> Result(s, e) {
 
   let header = <<0x00, 0x61, 0x73, 0x6d>>
   let version = <<0x01, 0x00, 0x00, 0x00>>
-  use os <- result.try(write_bytes(os, <<header:bits, version:bits>>))
+  use os <- result.try(write_bytes(os, bt(<<header:bits, version:bits>>)))
 
   // emit types
   let types = list.reverse(mb.types) |> list.map(encode_type_group)
@@ -1343,10 +1353,10 @@ pub fn emit_module(mb: ModuleBuilder, os: OutputStream(s, e)) -> Result(s, e) {
     list.reverse(mb.functions)
     |> list.filter_map(fn(func) {
       case func {
-        FunctionImplementation(_, _, _) -> Error(Nil)
-        FunctionImport(type_index, from) ->
+        FunctionImplementation(..) -> Error(Nil)
+        FunctionImport(type_index:, from:, ..) ->
           Ok(ImportFunction(from.module, from.name, type_index))
-        FunctionMissing(_) -> Error(Nil)
+        FunctionMissing(..) -> Error(Nil)
       }
     })
     |> list.map(encode_import)
@@ -1361,9 +1371,9 @@ pub fn emit_module(mb: ModuleBuilder, os: OutputStream(s, e)) -> Result(s, e) {
     |> list.filter_map(fn(func) {
       case func {
         FunctionImplementation(type_index:, ..) ->
-          Ok(leb128_encode_unsigned(type_index))
-        FunctionImport(_, _) -> Error(Nil)
-        FunctionMissing(_) -> Error(Nil)
+          Ok(bt(leb128_encode_unsigned(type_index)))
+        FunctionImport(..) -> Error(Nil)
+        FunctionMissing(..) -> Error(Nil)
       }
     })
   use os <- result.try(write_bytes(
@@ -1404,7 +1414,10 @@ pub fn emit_module(mb: ModuleBuilder, os: OutputStream(s, e)) -> Result(s, e) {
     Some(function_index) ->
       write_bytes(
         os,
-        encode_section(section_start, leb128_encode_unsigned(function_index)),
+        encode_section(
+          section_start,
+          bt(leb128_encode_unsigned(function_index)),
+        ),
       )
     None -> Ok(os)
   })
@@ -1416,10 +1429,10 @@ pub fn emit_module(mb: ModuleBuilder, os: OutputStream(s, e)) -> Result(s, e) {
     list.reverse(mb.functions)
     |> list.filter_map(fn(func) {
       case func {
-        FunctionImplementation(_type_index, locals, code) ->
+        FunctionImplementation(locals:, code:, ..) ->
           Ok(encode_function_code(locals, code))
-        FunctionImport(_, _) -> Error(Nil)
-        FunctionMissing(_) -> Error(Nil)
+        FunctionImport(..) -> Error(Nil)
+        FunctionMissing(..) -> Error(Nil)
       }
     })
   use os <- result.try(write_bytes(
@@ -1427,29 +1440,45 @@ pub fn emit_module(mb: ModuleBuilder, os: OutputStream(s, e)) -> Result(s, e) {
     encode_section(section_code, encode_vector(func_codes)),
   ))
 
+  // emit names
+  use os <- result.try(write_bytes(
+    os,
+    encode_custom_section("name", encode_names(mb)),
+  ))
+
   Ok(os.stream)
 }
 
 fn write_bytes(
   os: OutputStream(s, e),
-  bytes: BitArray,
+  bytes: BytesTree,
 ) -> Result(OutputStream(s, e), e) {
-  os.write_bytes(os.stream, bytes)
+  os.write_bytes(os.stream, bytes_tree.to_bit_array(bytes))
   |> result.map(fn(stream) { OutputStream(..os, stream:) })
 }
 
-fn encode_section(section: Int, data: BitArray) {
-  bit_array.append(<<section:size(8)>>, prepend_byte_size(data))
+fn encode_section(section_id: BitArray, data: BytesTree) -> BytesTree {
+  bytes_tree.prepend(to: prepend_byte_size(data), prefix: section_id)
 }
 
-fn prepend_byte_size(data: BitArray) -> BitArray {
-  bit_array.append(leb128_encode_unsigned(bit_array.byte_size(data)), data)
+fn encode_custom_section(name: String, data: BytesTree) -> BytesTree {
+  encode_section(
+    section_custom,
+    bytes_tree.prepend_tree(prefix: encode_name(name), to: data),
+  )
 }
 
-fn encode_vector(data: List(BitArray)) -> BitArray {
-  bit_array.append(
-    leb128_encode_unsigned(list.length(data)),
-    list.fold(data, <<>>, bit_array.append),
+fn prepend_byte_size(data: BytesTree) -> BytesTree {
+  bytes_tree.prepend(
+    to: data,
+    prefix: leb128_encode_unsigned(bytes_tree.byte_size(data)),
+  )
+}
+
+fn encode_vector(data: List(BytesTree)) -> BytesTree {
+  bytes_tree.prepend(
+    to: bytes_tree.concat(data),
+    prefix: leb128_encode_unsigned(list.length(data)),
   )
 }
 
@@ -1460,21 +1489,27 @@ fn leb128_encode_unsigned(u: Int) -> BitArray {
   }
 }
 
-fn encode_value_type(t: ValueType) -> BitArray {
+fn encode_value_type(t: ValueType) -> BytesTree {
   case t {
-    F32 -> code_type_i32
-    F64 -> code_type_i64
-    I32 -> code_type_f32
-    I64 -> code_type_f64
+    F32 -> bt(code_type_i32)
+    F64 -> bt(code_type_i64)
+    I32 -> bt(code_type_f32)
+    I64 -> bt(code_type_f64)
     Ref(NonNull(heap_type)) ->
-      bit_array.append(code_ref_non_null, encode_heap_type(heap_type))
+      bytes_tree.prepend(
+        prefix: code_ref_non_null,
+        to: encode_heap_type(heap_type),
+      )
     Ref(Nullable(heap_type)) ->
-      bit_array.append(code_ref_nullable, encode_heap_type(heap_type))
-    V128 -> code_type_v128
+      bytes_tree.prepend(
+        prefix: code_ref_nullable,
+        to: encode_heap_type(heap_type),
+      )
+    V128 -> bt(code_type_v128)
   }
 }
 
-fn encode_heap_type(h: HeapType) {
+fn encode_heap_type(h: HeapType) -> BytesTree {
   case h {
     AbstractAny -> code_type_abs_any
     AbstractArray -> code_type_abs_array
@@ -1488,20 +1523,21 @@ fn encode_heap_type(h: HeapType) {
     AbstractStruct -> code_type_abs_struct
     ConcreteType(index) -> leb128_encode_unsigned(index)
   }
+  |> bt
 }
 
-fn encode_field_types(fs: List(FieldType)) -> BitArray {
+fn encode_field_types(fs: List(FieldType)) -> BytesTree {
   list.map(fs, encode_field_type)
   |> encode_vector
 }
 
-fn encode_field_type(f: FieldType) -> BitArray {
+fn encode_field_type(f: FieldType) -> BytesTree {
   let valtype = case f {
-    PackedType(_, I8) -> code_type_i8
-    PackedType(_, I16) -> code_type_i16
+    PackedType(_, I8) -> bt(code_type_i8)
+    PackedType(_, I16) -> bt(code_type_i16)
     ValueType(_, value) -> encode_value_type(value)
   }
-  bit_array.append(valtype, encode_mutability(f.mutable))
+  bytes_tree.append(to: valtype, suffix: encode_mutability(f.mutable))
 }
 
 fn encode_mutability(mutable: Mutability) -> BitArray {
@@ -1511,194 +1547,221 @@ fn encode_mutability(mutable: Mutability) -> BitArray {
   }
 }
 
-fn encode_result_type(rs: List(ValueType)) -> BitArray {
+fn encode_result_type(rs: List(ValueType)) -> BytesTree {
   list.map(rs, encode_value_type)
   |> encode_vector
 }
 
-fn encode_type_group(ts: List(CompositeType)) -> BitArray {
+fn encode_type_group(ts: List(CompositeType)) -> BytesTree {
   case ts {
     [t] -> encode_typedef(t)
     _ ->
-      bit_array.append(
-        code_type_rec,
-        encode_vector(list.map(ts, encode_typedef)),
+      bytes_tree.prepend(
+        prefix: code_type_rec,
+        to: encode_vector(list.map(ts, encode_typedef)),
       )
   }
 }
 
-fn encode_typedef(t: CompositeType) -> BitArray {
+fn encode_typedef(t: CompositeType) -> BytesTree {
   case t {
-    Array(element) -> [code_type_array, encode_field_type(element)]
+    Array(element) -> [bt(code_type_array), encode_field_type(element)]
     Func(params, results) -> [
-      code_type_func,
+      bt(code_type_func),
       encode_result_type(params),
       encode_result_type(results),
     ]
-    Struct(fields) -> [code_type_struct, encode_field_types(fields)]
+    Struct(fields) -> [bt(code_type_struct), encode_field_types(fields)]
   }
-  |> bit_array.concat
+  |> bytes_tree.concat
 }
 
-fn encode_import(i: Import) -> BitArray {
+fn encode_import(i: Import) -> BytesTree {
   [
     encode_name(i.module),
     encode_name(i.name),
     case i {
       ImportFunction(type_index:, ..) ->
-        bit_array.append(<<0x00>>, leb128_encode_unsigned(type_index))
+        bytes_tree.prepend(
+          prefix: <<0x00>>,
+          to: bt(leb128_encode_unsigned(type_index)),
+        )
     },
   ]
-  |> bit_array.concat
+  |> bytes_tree.concat
 }
 
 fn encode_global(
   mutable: Mutability,
   value_type: ValueType,
   code: List(Instruction),
-) -> BitArray {
+) -> BytesTree {
   [
     encode_value_type(value_type),
-    encode_mutability(mutable),
+    bt(encode_mutability(mutable)),
     ..list.map(code, encode_instruction)
   ]
-  |> bit_array.concat
+  |> bytes_tree.concat
 }
 
-fn encode_export(e: Export) -> BitArray {
+fn encode_export(e: Export) -> BytesTree {
   [
     encode_name(e.name),
     case e {
       ExportFunction(_, function_index) ->
-        bit_array.append(<<0x00>>, leb128_encode_unsigned(function_index))
+        bytes_tree.prepend(
+          prefix: <<0x00>>,
+          to: bt(leb128_encode_unsigned(function_index)),
+        )
     },
   ]
-  |> bit_array.concat
+  |> bytes_tree.concat
 }
 
-fn encode_name(name: String) -> BitArray {
-  prepend_byte_size(bit_array.from_string(name))
+fn encode_name(name: String) -> BytesTree {
+  prepend_byte_size(bytes_tree.from_string(name))
 }
 
 fn encode_function_code(
   locals: List(ValueType),
   code: List(Instruction),
-) -> BitArray {
+) -> BytesTree {
   [encode_result_type(locals), ..list.map(code, encode_instruction)]
-  |> bit_array.concat
+  |> bytes_tree.concat
   |> prepend_byte_size
 }
 
-fn encode_instruction(instr: Instruction) -> BitArray {
+fn encode_instruction(instr: Instruction) -> BytesTree {
   case instr {
     // Control instructions
-    Unreachable -> code_instr_unreachable
-    Nop -> code_instr_nop
+    Unreachable -> bt(code_instr_unreachable)
+    Nop -> bt(code_instr_nop)
     Block(block_type) ->
-      bit_array.concat([code_instr_block, encode_block_type(block_type)])
+      bytes_tree.prepend(
+        prefix: code_instr_block,
+        to: encode_block_type(block_type),
+      )
     Loop(block_type) ->
-      bit_array.concat([code_instr_loop, encode_block_type(block_type)])
+      bytes_tree.prepend(
+        prefix: code_instr_loop,
+        to: encode_block_type(block_type),
+      )
     If(block_type) ->
-      bit_array.concat([code_instr_if, encode_block_type(block_type)])
-    Else -> code_instr_else
+      bytes_tree.prepend(
+        prefix: code_instr_if,
+        to: encode_block_type(block_type),
+      )
+    Else -> bt(code_instr_else)
     Break(label_index) ->
-      bit_array.concat([code_instr_break, leb128_encode_unsigned(label_index)])
+      bytes_tree.concat_bit_arrays([
+        code_instr_break,
+        leb128_encode_unsigned(label_index),
+      ])
     BreakIf(label_index) ->
-      bit_array.concat([
+      bytes_tree.concat_bit_arrays([
         code_instr_break_if,
         leb128_encode_unsigned(label_index),
       ])
-    Return -> code_instr_return
+    Return -> bt(code_instr_return)
     Call(function_index) ->
-      bit_array.concat([code_instr_call, leb128_encode_unsigned(function_index)])
+      bytes_tree.concat_bit_arrays([
+        code_instr_call,
+        leb128_encode_unsigned(function_index),
+      ])
     // TODO: CallIndirect
     ReturnCall(function_index) ->
-      bit_array.concat([
+      bytes_tree.concat_bit_arrays([
         code_instr_return_call,
         leb128_encode_unsigned(function_index),
       ])
     // TODO: ReturnCallIndirect
     CallRef(type_index) ->
-      bit_array.concat([code_instr_call_ref, leb128_encode_unsigned(type_index)])
+      bytes_tree.concat_bit_arrays([
+        code_instr_call_ref,
+        leb128_encode_unsigned(type_index),
+      ])
     ReturnCallRef(type_index) ->
-      bit_array.concat([
+      bytes_tree.concat_bit_arrays([
         code_instr_return_call_ref,
         leb128_encode_unsigned(type_index),
       ])
     BreakOnNull(label_index) ->
-      bit_array.concat([
+      bytes_tree.concat_bit_arrays([
         code_instr_break_on_null,
         leb128_encode_unsigned(label_index),
       ])
     BreakOnNonNull(label_index) ->
-      bit_array.concat([
+      bytes_tree.concat_bit_arrays([
         code_instr_break_on_non_null,
         leb128_encode_unsigned(label_index),
       ])
     // TODO: BreakOn*
-    End -> code_instr_end
+    End -> bt(code_instr_end)
     //
     // Reference instructions
     RefNull(heap_type) ->
-      bit_array.concat([code_instr_ref_null, encode_heap_type(heap_type)])
+      bytes_tree.prepend(
+        prefix: code_instr_ref_null,
+        to: encode_heap_type(heap_type),
+      )
     RefFunc(function_index) ->
-      bit_array.concat([
+      bytes_tree.concat_bit_arrays([
         code_instr_ref_func,
         leb128_encode_unsigned(function_index),
       ])
-    RefIsNull -> code_instr_ref_is_null
-    RefAsNonNull -> code_instr_ref_as_non_null
-    RefEq -> code_instr_ref_eq
+    RefIsNull -> bt(code_instr_ref_is_null)
+    RefAsNonNull -> bt(code_instr_ref_as_non_null)
+    RefEq -> bt(code_instr_ref_eq)
     RefTest(NonNull(heap_type)) ->
-      bit_array.concat([
-        code_instr_ref_test_nonnull,
-        encode_heap_type(heap_type),
-      ])
+      bytes_tree.prepend(
+        prefix: code_instr_ref_test_nonnull,
+        to: encode_heap_type(heap_type),
+      )
     RefTest(Nullable(heap_type)) ->
-      bit_array.concat([
-        code_instr_ref_test_nullable,
-        encode_heap_type(heap_type),
-      ])
+      bytes_tree.prepend(
+        prefix: code_instr_ref_test_nullable,
+        to: encode_heap_type(heap_type),
+      )
     RefCast(NonNull(heap_type)) ->
-      bit_array.concat([
-        code_instr_ref_cast_nonnull,
-        encode_heap_type(heap_type),
-      ])
+      bytes_tree.prepend(
+        prefix: code_instr_ref_cast_nonnull,
+        to: encode_heap_type(heap_type),
+      )
     RefCast(Nullable(heap_type)) ->
-      bit_array.concat([
-        code_instr_ref_cast_nullable,
-        encode_heap_type(heap_type),
-      ])
+      bytes_tree.prepend(
+        prefix: code_instr_ref_cast_nullable,
+        to: encode_heap_type(heap_type),
+      )
     StructNew(type_index) ->
-      bit_array.concat([
+      bytes_tree.concat_bit_arrays([
         code_instr_struct_new,
         leb128_encode_unsigned(type_index),
       ])
     StructNewDefault(type_index) ->
-      bit_array.concat([
+      bytes_tree.concat_bit_arrays([
         code_instr_struct_new_default,
         leb128_encode_unsigned(type_index),
       ])
     StructGet(type_index, field_index) ->
-      bit_array.concat([
+      bytes_tree.concat_bit_arrays([
         code_instr_struct_get,
         leb128_encode_unsigned(type_index),
         leb128_encode_unsigned(field_index),
       ])
     StructGetS(type_index, field_index) ->
-      bit_array.concat([
+      bytes_tree.concat_bit_arrays([
         code_instr_struct_get_s,
         leb128_encode_unsigned(type_index),
         leb128_encode_unsigned(field_index),
       ])
     StructGetU(type_index, field_index) ->
-      bit_array.concat([
+      bytes_tree.concat_bit_arrays([
         code_instr_struct_get_u,
         leb128_encode_unsigned(type_index),
         leb128_encode_unsigned(field_index),
       ])
     StructSet(type_index, field_index) ->
-      bit_array.concat([
+      bytes_tree.concat_bit_arrays([
         code_instr_struct_set,
         leb128_encode_unsigned(type_index),
         leb128_encode_unsigned(field_index),
@@ -1706,37 +1769,37 @@ fn encode_instruction(instr: Instruction) -> BitArray {
     // TODO: remaining reference instructions
     //
     // Parametric instructions
-    Drop -> code_instr_drop
-    Select([]) -> code_instr_select
+    Drop -> bt(code_instr_drop)
+    Select([]) -> bt(code_instr_select)
     Select(types) ->
-      bit_array.concat([
-        code_instr_select_typed,
-        list.map(types, encode_value_type) |> encode_vector,
-      ])
+      bytes_tree.prepend(
+        prefix: code_instr_select_typed,
+        to: list.map(types, encode_value_type) |> encode_vector,
+      )
     //
     // Variable instructions
     LocalGet(local_index) ->
-      bit_array.concat([
+      bytes_tree.concat_bit_arrays([
         code_instr_local_get,
         leb128_encode_unsigned(local_index),
       ])
     LocalSet(local_index) ->
-      bit_array.concat([
+      bytes_tree.concat_bit_arrays([
         code_instr_local_set,
         leb128_encode_unsigned(local_index),
       ])
     LocalTee(local_index) ->
-      bit_array.concat([
+      bytes_tree.concat_bit_arrays([
         code_instr_local_tee,
         leb128_encode_unsigned(local_index),
       ])
     GlobalGet(global_index) ->
-      bit_array.concat([
+      bytes_tree.concat_bit_arrays([
         code_instr_global_get,
         leb128_encode_unsigned(global_index),
       ])
     GlobalSet(global_index) ->
-      bit_array.concat([
+      bytes_tree.concat_bit_arrays([
         code_instr_global_set,
         leb128_encode_unsigned(global_index),
       ])
@@ -1749,111 +1812,123 @@ fn encode_instruction(instr: Instruction) -> BitArray {
     //
     // Numeric instructions
     I32Const(value) ->
-      bit_array.concat([code_instr_i32_const, gleb128.encode_signed(value)])
+      bytes_tree.concat_bit_arrays([
+        code_instr_i32_const,
+        gleb128.encode_signed(value),
+      ])
     I64Const(value) ->
-      bit_array.concat([code_instr_i64_const, gleb128.encode_signed(value)])
+      bytes_tree.concat_bit_arrays([
+        code_instr_i64_const,
+        gleb128.encode_signed(value),
+      ])
     F32Const(value) ->
-      bit_array.concat([code_instr_f32_const, ieee_float.to_bytes_32_le(value)])
+      bytes_tree.concat_bit_arrays([
+        code_instr_f32_const,
+        ieee_float.to_bytes_32_le(value),
+      ])
     F64Const(value) ->
-      bit_array.concat([code_instr_f64_const, ieee_float.to_bytes_64_le(value)])
-    I32EqZ -> code_instr_i32_eq_z
-    I32Eq -> code_instr_i32_eq
-    I32NE -> code_instr_i32_ne
-    I32LtS -> code_instr_i32_lt_s
-    I32LtU -> code_instr_i32_lt_u
-    I32GtS -> code_instr_i32_gt_s
-    I32GtU -> code_instr_i32_gt_u
-    I32LeS -> code_instr_i32_le_s
-    I32LeU -> code_instr_i32_le_u
-    I32GeS -> code_instr_i32_ge_s
-    I32GeU -> code_instr_i32_ge_u
-    I64EqZ -> code_instr_i64_eq_z
-    I64Eq -> code_instr_i64_eq
-    I64NE -> code_instr_i64_ne
-    I64LtS -> code_instr_i64_lt_s
-    I64LtU -> code_instr_i64_lt_u
-    I64GtS -> code_instr_i64_gt_s
-    I64GtU -> code_instr_i64_gt_u
-    I64LeS -> code_instr_i64_le_s
-    I64LeU -> code_instr_i64_le_u
-    I64GeS -> code_instr_i64_ge_s
-    I64GeU -> code_instr_i64_ge_u
-    F32Eq -> code_instr_f32_eq
-    F32NE -> code_instr_f32_ne
-    F32Lt -> code_instr_f32_lt
-    F32Gt -> code_instr_f32_gt
-    F32Le -> code_instr_f32_le
-    F32Ge -> code_instr_f32_ge
-    F64Eq -> code_instr_f64_eq
-    F64NE -> code_instr_f64_ne
-    F64Lt -> code_instr_f64_lt
-    F64Gt -> code_instr_f64_gt
-    F64Le -> code_instr_f64_le
-    F64Ge -> code_instr_f64_ge
-    I32CntLZ -> code_instr_i32_cnt_lz
-    I32CntTZ -> code_instr_i32_cnt_tz
-    I32PopCnt -> code_instr_i32_pop_cnt
-    I32Add -> code_instr_i32_add
-    I32Sub -> code_instr_i32_sub
-    I32Mul -> code_instr_i32_mul
-    I32DivS -> code_instr_i32_div_s
-    I32DivU -> code_instr_i32_div_u
-    I32RemS -> code_instr_i32_rem_s
-    I32RemU -> code_instr_i32_rem_u
-    I32And -> code_instr_i32_and
-    I32Or -> code_instr_i32_or
-    I32Xor -> code_instr_i32_xor
-    I32ShL -> code_instr_i32_sh_l
-    I32ShRS -> code_instr_i32_sh_r_s
-    I32ShLU -> code_instr_i32_sh_r_u
-    I32RotL -> code_instr_i32_rot_l
-    I32RotR -> code_instr_i32_rot_r
-    I64CntLZ -> code_instr_i64_cnt_lz
-    I64CntTZ -> code_instr_i64_cnt_tz
-    I64PopCnt -> code_instr_i64_pop_cnt
-    I64Add -> code_instr_i64_add
-    I64Sub -> code_instr_i64_sub
-    I64Mul -> code_instr_i64_mul
-    I64DivS -> code_instr_i64_div_s
-    I64DivU -> code_instr_i64_div_u
-    I64RemS -> code_instr_i64_rem_s
-    I64RemU -> code_instr_i64_rem_u
-    I64And -> code_instr_i64_and
-    I64Or -> code_instr_i64_or
-    I64Xor -> code_instr_i64_xor
-    I64ShL -> code_instr_i64_sh_l
-    I64ShRS -> code_instr_i64_sh_r_s
-    I64ShLU -> code_instr_i64_sh_r_u
-    I64RotL -> code_instr_i64_rot_l
-    I64RotR -> code_instr_i64_rot_r
-    F32Abs -> code_instr_f32_abs
-    F32Neg -> code_instr_f32_neg
-    F32Ceil -> code_instr_f32_ceil
-    F32Floor -> code_instr_f32_floor
-    F32Trunc -> code_instr_f32_trunc
-    F32Nearest -> code_instr_f32_nearest
-    F32Sqrt -> code_instr_f32_sqrt
-    F32Add -> code_instr_f32_add
-    F32Sub -> code_instr_f32_sub
-    F32Mul -> code_instr_f32_mul
-    F32Div -> code_instr_f32_div
-    F32Min -> code_instr_f32_min
-    F32Max -> code_instr_f32_max
-    F32CopySign -> code_instr_f32_copy_sign
-    F64Abs -> code_instr_f64_abs
-    F64Neg -> code_instr_f64_neg
-    F64Ceil -> code_instr_f64_ceil
-    F64Floor -> code_instr_f64_floor
-    F64Trunc -> code_instr_f64_trunc
-    F64Nearest -> code_instr_f64_nearest
-    F64Sqrt -> code_instr_f64_sqrt
-    F64Add -> code_instr_f64_add
-    F64Sub -> code_instr_f64_sub
-    F64Mul -> code_instr_f64_mul
-    F64Div -> code_instr_f64_div
-    F64Min -> code_instr_f64_min
-    F64Max -> code_instr_f64_max
-    F64CopySign -> code_instr_f64_copy_sign
+      bytes_tree.concat_bit_arrays([
+        code_instr_f64_const,
+        ieee_float.to_bytes_64_le(value),
+      ])
+    I32EqZ -> bt(code_instr_i32_eq_z)
+    I32Eq -> bt(code_instr_i32_eq)
+    I32NE -> bt(code_instr_i32_ne)
+    I32LtS -> bt(code_instr_i32_lt_s)
+    I32LtU -> bt(code_instr_i32_lt_u)
+    I32GtS -> bt(code_instr_i32_gt_s)
+    I32GtU -> bt(code_instr_i32_gt_u)
+    I32LeS -> bt(code_instr_i32_le_s)
+    I32LeU -> bt(code_instr_i32_le_u)
+    I32GeS -> bt(code_instr_i32_ge_s)
+    I32GeU -> bt(code_instr_i32_ge_u)
+    I64EqZ -> bt(code_instr_i64_eq_z)
+    I64Eq -> bt(code_instr_i64_eq)
+    I64NE -> bt(code_instr_i64_ne)
+    I64LtS -> bt(code_instr_i64_lt_s)
+    I64LtU -> bt(code_instr_i64_lt_u)
+    I64GtS -> bt(code_instr_i64_gt_s)
+    I64GtU -> bt(code_instr_i64_gt_u)
+    I64LeS -> bt(code_instr_i64_le_s)
+    I64LeU -> bt(code_instr_i64_le_u)
+    I64GeS -> bt(code_instr_i64_ge_s)
+    I64GeU -> bt(code_instr_i64_ge_u)
+    F32Eq -> bt(code_instr_f32_eq)
+    F32NE -> bt(code_instr_f32_ne)
+    F32Lt -> bt(code_instr_f32_lt)
+    F32Gt -> bt(code_instr_f32_gt)
+    F32Le -> bt(code_instr_f32_le)
+    F32Ge -> bt(code_instr_f32_ge)
+    F64Eq -> bt(code_instr_f64_eq)
+    F64NE -> bt(code_instr_f64_ne)
+    F64Lt -> bt(code_instr_f64_lt)
+    F64Gt -> bt(code_instr_f64_gt)
+    F64Le -> bt(code_instr_f64_le)
+    F64Ge -> bt(code_instr_f64_ge)
+    I32CntLZ -> bt(code_instr_i32_cnt_lz)
+    I32CntTZ -> bt(code_instr_i32_cnt_tz)
+    I32PopCnt -> bt(code_instr_i32_pop_cnt)
+    I32Add -> bt(code_instr_i32_add)
+    I32Sub -> bt(code_instr_i32_sub)
+    I32Mul -> bt(code_instr_i32_mul)
+    I32DivS -> bt(code_instr_i32_div_s)
+    I32DivU -> bt(code_instr_i32_div_u)
+    I32RemS -> bt(code_instr_i32_rem_s)
+    I32RemU -> bt(code_instr_i32_rem_u)
+    I32And -> bt(code_instr_i32_and)
+    I32Or -> bt(code_instr_i32_or)
+    I32Xor -> bt(code_instr_i32_xor)
+    I32ShL -> bt(code_instr_i32_sh_l)
+    I32ShRS -> bt(code_instr_i32_sh_r_s)
+    I32ShLU -> bt(code_instr_i32_sh_r_u)
+    I32RotL -> bt(code_instr_i32_rot_l)
+    I32RotR -> bt(code_instr_i32_rot_r)
+    I64CntLZ -> bt(code_instr_i64_cnt_lz)
+    I64CntTZ -> bt(code_instr_i64_cnt_tz)
+    I64PopCnt -> bt(code_instr_i64_pop_cnt)
+    I64Add -> bt(code_instr_i64_add)
+    I64Sub -> bt(code_instr_i64_sub)
+    I64Mul -> bt(code_instr_i64_mul)
+    I64DivS -> bt(code_instr_i64_div_s)
+    I64DivU -> bt(code_instr_i64_div_u)
+    I64RemS -> bt(code_instr_i64_rem_s)
+    I64RemU -> bt(code_instr_i64_rem_u)
+    I64And -> bt(code_instr_i64_and)
+    I64Or -> bt(code_instr_i64_or)
+    I64Xor -> bt(code_instr_i64_xor)
+    I64ShL -> bt(code_instr_i64_sh_l)
+    I64ShRS -> bt(code_instr_i64_sh_r_s)
+    I64ShLU -> bt(code_instr_i64_sh_r_u)
+    I64RotL -> bt(code_instr_i64_rot_l)
+    I64RotR -> bt(code_instr_i64_rot_r)
+    F32Abs -> bt(code_instr_f32_abs)
+    F32Neg -> bt(code_instr_f32_neg)
+    F32Ceil -> bt(code_instr_f32_ceil)
+    F32Floor -> bt(code_instr_f32_floor)
+    F32Trunc -> bt(code_instr_f32_trunc)
+    F32Nearest -> bt(code_instr_f32_nearest)
+    F32Sqrt -> bt(code_instr_f32_sqrt)
+    F32Add -> bt(code_instr_f32_add)
+    F32Sub -> bt(code_instr_f32_sub)
+    F32Mul -> bt(code_instr_f32_mul)
+    F32Div -> bt(code_instr_f32_div)
+    F32Min -> bt(code_instr_f32_min)
+    F32Max -> bt(code_instr_f32_max)
+    F32CopySign -> bt(code_instr_f32_copy_sign)
+    F64Abs -> bt(code_instr_f64_abs)
+    F64Neg -> bt(code_instr_f64_neg)
+    F64Ceil -> bt(code_instr_f64_ceil)
+    F64Floor -> bt(code_instr_f64_floor)
+    F64Trunc -> bt(code_instr_f64_trunc)
+    F64Nearest -> bt(code_instr_f64_nearest)
+    F64Sqrt -> bt(code_instr_f64_sqrt)
+    F64Add -> bt(code_instr_f64_add)
+    F64Sub -> bt(code_instr_f64_sub)
+    F64Mul -> bt(code_instr_f64_mul)
+    F64Div -> bt(code_instr_f64_div)
+    F64Min -> bt(code_instr_f64_min)
+    F64Max -> bt(code_instr_f64_max)
+    F64CopySign -> bt(code_instr_f64_copy_sign)
     // TODO: conversions / truncations / etc.
     //
     // Vector instructions
@@ -1861,10 +1936,48 @@ fn encode_instruction(instr: Instruction) -> BitArray {
   }
 }
 
-fn encode_block_type(t: BlockType) -> BitArray {
+fn encode_block_type(t: BlockType) -> BytesTree {
   case t {
-    BlockEmpty -> code_type_empty
+    BlockEmpty -> bt(code_type_empty)
     BlockValue(vt) -> encode_value_type(vt)
+  }
+}
+
+fn encode_names(mb: ModuleBuilder) -> BytesTree {
+  let function_names =
+    list.index_map(list.reverse(mb.functions), fn(func, index) {
+      #(index, func.name)
+    })
+    |> list.filter_map(fn(func) {
+      let #(index, name) = func
+      case name {
+        None -> Error(Nil)
+        Some(name) -> Ok(#(index, name))
+      }
+    })
+  let function_names_data =
+    encode_name_assoc(names_subsection_function, function_names)
+  function_names_data
+}
+
+fn encode_name_assoc(
+  subsection_id: BitArray,
+  name_map: List(#(Int, String)),
+) -> BytesTree {
+  case name_map {
+    [] -> bytes_tree.new()
+    _ -> {
+      list.map(name_map, fn(assoc) {
+        let #(index, name) = assoc
+        bytes_tree.prepend(
+          prefix: leb128_encode_unsigned(index),
+          to: encode_name(name),
+        )
+      })
+      |> encode_vector
+      |> prepend_byte_size
+      |> bytes_tree.prepend(subsection_id)
+    }
   }
 }
 
@@ -1872,29 +1985,39 @@ fn encode_block_type(t: BlockType) -> BitArray {
 // WebAssembly binary codes
 // --------------------------------------------------------------------------- 
 
-const section_custom = 0
+const section_custom = <<0>>
 
-const section_type = 1
+const section_type = <<1>>
 
-const section_import = 2
+const section_import = <<2>>
 
-const section_func = 3
+const section_func = <<3>>
 
-const section_table = 4
+const section_table = <<4>>
 
-const section_memory = 5
+const section_memory = <<5>>
 
-const section_global = 6
+const section_global = <<6>>
 
-const section_export = 7
+const section_export = <<7>>
 
-const section_start = 8
+const section_start = <<8>>
 
-const section_element = 9
+const section_element = <<9>>
 
-const section_code = 10
+const section_code = <<10>>
 
-const section_data = 11
+const section_data = <<11>>
+
+const names_subsection_module = <<0>>
+
+const names_subsection_function = <<1>>
+
+const names_subsection_local = <<2>>
+
+const names_subsection_type = <<4>>
+
+const names_subsection_field = <<10>>
 
 const code_type_i32 = <<0x7f>>
 
