@@ -27,6 +27,7 @@ pub type OutputStream(s, e) {
 /// Builder to enable incremental construction of a module.
 pub opaque type ModuleBuilder {
   ModuleBuilder(
+    name: Option(String),
     /// type groups stored in reverse order
     types: List(List(CompositeType)),
     next_type_index: Int,
@@ -59,7 +60,12 @@ pub opaque type CodeBuilder {
 
 pub type BuildType {
   BuildFunction(function_index: Int, type_index: Int, name: Option(String))
-  BuildGlobal(global_index: Int, mutable: Mutability, value_type: ValueType)
+  BuildGlobal(
+    global_index: Int,
+    name: Option(String),
+    mutable: Mutability,
+    value_type: ValueType,
+  )
 }
 
 pub type FunctionSignature {
@@ -94,13 +100,23 @@ pub type FunctionDefinition {
 }
 
 pub type GlobalDefinition {
-  GlobalImport(mutable: Mutability, value_type: ValueType, ImportSource)
+  GlobalImport(
+    name: Option(String),
+    mutable: Mutability,
+    value_type: ValueType,
+    ImportSource,
+  )
   GlobalInitialization(
+    name: Option(String),
     mutable: Mutability,
     value_type: ValueType,
     code: List(Instruction),
   )
-  GlobalMissing(mutable: Mutability, value_type: ValueType)
+  GlobalMissing(
+    name: Option(String),
+    mutable: Mutability,
+    value_type: ValueType,
+  )
 }
 
 /// Represents an import source.
@@ -365,8 +381,9 @@ pub type BlockType {
 // --------------------------------------------------------------------------- 
 
 /// Creates a ModuleBuilder.
-pub fn create_module_builder() -> ModuleBuilder {
+pub fn create_module_builder(name: Option(String)) -> ModuleBuilder {
   ModuleBuilder(
+    name:,
     types: [],
     next_type_index: 0,
     functions: [],
@@ -597,10 +614,11 @@ fn get_function(
 /// Can be done any time before creating a function that uses it.
 pub fn create_global_builder(
   mb: ModuleBuilder,
+  name: Option(String),
   mutable: Mutability,
   value_type: ValueType,
 ) -> Result(#(ModuleBuilder, CodeBuilder), String) {
-  let global = GlobalMissing(mutable:, value_type:)
+  let global = GlobalMissing(name:, mutable:, value_type:)
   let module_builder =
     ModuleBuilder(
       ..mb,
@@ -609,7 +627,12 @@ pub fn create_global_builder(
     )
   create_code_builder(
     module_builder,
-    BuildGlobal(global_index: mb.next_global_index, mutable:, value_type:),
+    BuildGlobal(
+      global_index: mb.next_global_index,
+      name:,
+      mutable:,
+      value_type:,
+    ),
     [],
     [],
     [value_type],
@@ -1335,11 +1358,16 @@ pub fn finalize_global(
   fb: CodeBuilder,
 ) -> Result(ModuleBuilder, String) {
   case fb.builds, fb.label_stack {
-    BuildGlobal(global_index:, mutable:, value_type:), [] ->
+    BuildGlobal(global_index:, name:, mutable:, value_type:), [] ->
       list_replace(
         mb.globals,
         mb.next_global_index - global_index - 1,
-        GlobalInitialization(mutable:, value_type:, code: list.reverse(fb.code)),
+        GlobalInitialization(
+          name:,
+          mutable:,
+          value_type:,
+          code: list.reverse(fb.code),
+        ),
       )
       |> result.replace_error(
         "No global at index " <> int.to_string(global_index),
@@ -1462,7 +1490,7 @@ pub fn emit_module(mb: ModuleBuilder, os: OutputStream(s, e)) -> Result(s, e) {
     list.reverse(mb.globals)
     |> list.filter_map(fn(global) {
       case global {
-        GlobalInitialization(mutable:, value_type:, code:) ->
+        GlobalInitialization(mutable:, value_type:, code:, ..) ->
           Ok(encode_global(mutable, value_type, code))
         _ -> Error(Nil)
       }
@@ -2019,6 +2047,13 @@ fn encode_block_type(t: BlockType) -> BytesTree {
 }
 
 fn encode_names(mb: ModuleBuilder) -> BytesTree {
+  let module_name =
+    case mb.name {
+      None -> bytes_tree.new()
+      Some(name) -> encode_name(name)
+    }
+    |> encode_name_subsection(names_subsection_module)
+
   let function_names =
     list.index_map(list.reverse(mb.functions), fn(func, index) {
       #(index, func.name)
@@ -2049,6 +2084,13 @@ fn encode_names(mb: ModuleBuilder) -> BytesTree {
     |> encode_indirect_name_map
     |> encode_name_subsection(names_subsection_local)
 
+  let global_names =
+    list.reverse(mb.globals)
+    |> list.index_map(fn(t, index) { #(index, t.name) })
+    |> named_only
+    |> encode_name_map
+    |> encode_name_subsection(names_subsection_global)
+
   let field_names =
     list.index_map(types, fn(t, index) {
       let field_names =
@@ -2067,7 +2109,14 @@ fn encode_names(mb: ModuleBuilder) -> BytesTree {
     |> encode_indirect_name_map
     |> encode_name_subsection(names_subsection_field)
 
-  [function_names, local_names, type_names, field_names]
+  [
+    module_name,
+    function_names,
+    local_names,
+    type_names,
+    global_names,
+    field_names,
+  ]
   |> bytes_tree.concat
 }
 
@@ -2167,6 +2216,8 @@ const names_subsection_function = <<1>>
 const names_subsection_local = <<2>>
 
 const names_subsection_type = <<4>>
+
+const names_subsection_global = <<4>>
 
 const names_subsection_field = <<10>>
 
