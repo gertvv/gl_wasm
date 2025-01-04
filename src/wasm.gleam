@@ -82,6 +82,12 @@ pub type OutputStream(s, e) {
   )
 }
 
+/// Error raised while emitting binary WebAssembly
+pub type EmissionError(e) {
+  ValidationError(String)
+  OutputStreamError(e)
+}
+
 /// Builder to enable incremental construction of a module.
 pub opaque type ModuleBuilder {
   ModuleBuilder(
@@ -137,12 +143,7 @@ pub type FunctionSignature {
 /// Functions can be defined via import or implementation. While they are being
 /// constructed the `FunctionMissing` placeholder is used.
 pub type FunctionDefinition {
-  FunctionImport(
-    type_index: Int,
-    name: Option(String),
-    local_names: List(Option(String)),
-    from: ImportSource,
-  )
+  FunctionImport(type_index: Int, name: Option(String), from: ImportSource)
   FunctionImplementation(
     type_index: Int,
     name: Option(String),
@@ -162,7 +163,7 @@ pub type GlobalDefinition {
     name: Option(String),
     mutable: Mutability,
     value_type: ValueType,
-    ImportSource,
+    from: ImportSource,
   )
   GlobalInitialization(
     name: Option(String),
@@ -184,10 +185,17 @@ pub type ImportSource {
 
 type Import {
   ImportFunction(module: String, name: String, type_index: Int)
+  ImportGlobal(
+    module: String,
+    name: String,
+    mutable: Mutability,
+    value_type: ValueType,
+  )
 }
 
 pub type Export {
   ExportFunction(name: String, function_index: Int)
+  ExportGlobal(name: String, global_index: Int)
 }
 
 /// Value types are the types that a variable accepts.
@@ -513,15 +521,46 @@ pub fn add_type_group(
   mb: ModuleBuilder,
   group: List(CompositeType),
 ) -> Result(#(ModuleBuilder, List(Int)), String) {
-  // TODO: validation
-  Ok(#(
+  // Check for references to undefined types
+  let referenced_types =
+    list.flat_map(group, fn(t) {
+      case t {
+        Array(item_type:, ..) -> [unpack_packed_field(item_type)]
+        Func(params:, result:, ..) -> list.append(result, params)
+        Struct(field_types:, ..) -> list.map(field_types, unpack_packed_field)
+      }
+    })
+  use _ <- result.map(ensure_types_are_defined(
+    referenced_types,
+    mb.next_type_index + list.length(group),
+  ))
+  #(
     ModuleBuilder(
       ..mb,
       types: [group, ..mb.types],
       next_type_index: mb.next_type_index + list.length(group),
     ),
     list.range(mb.next_type_index, mb.next_type_index + list.length(group) - 1),
-  ))
+  )
+}
+
+fn ensure_types_are_defined(
+  value_types: List(ValueType),
+  num_types: Int,
+) -> Result(Nil, String) {
+  list.filter_map(value_types, fn(value_type) {
+    case value_type {
+      Ref(NonNull(ConcreteType(index))) | Ref(Nullable(ConcreteType(index))) ->
+        Ok(index)
+      _ -> Error(Nil)
+    }
+  })
+  |> list.try_fold(Nil, fn(_, index) {
+    case index < num_types {
+      True -> Ok(Nil)
+      False -> Error("Type $" <> int.to_string(index) <> " not defined")
+    }
+  })
 }
 
 fn get_type(fb: CodeBuilder, type_index: Int) {
@@ -609,6 +648,27 @@ pub fn create_function_builders(
   |> result.map(fn(builders) { #(mb, builders) })
 }
 
+/// Import a function.
+pub fn import_function(
+  mb: ModuleBuilder,
+  type_index: Int,
+  name: Option(String),
+  from: ImportSource,
+) -> Result(ModuleBuilder, String) {
+  case get_type_by_index(mb, type_index) {
+    Ok(Func(..)) -> {
+      Ok(
+        ModuleBuilder(
+          ..mb,
+          functions: [FunctionImport(type_index:, name:, from:), ..mb.functions],
+          next_function_index: mb.next_function_index + 1,
+        ),
+      )
+    }
+    _ -> Error("Type $" <> int.to_string(type_index) <> " is not a func")
+  }
+}
+
 fn option_deepen(
   maybe_list: Option(List(a)),
   ref_list: List(b),
@@ -616,43 +676,6 @@ fn option_deepen(
   case maybe_list {
     None -> list.map(ref_list, fn(_) { None })
     Some(items) -> list.map(items, Some)
-  }
-}
-
-/// Import a function.
-pub fn import_function(
-  mb: ModuleBuilder,
-  signature: FunctionSignature,
-  from: ImportSource,
-) -> Result(ModuleBuilder, String) {
-  case get_type_by_index(mb, signature.type_index) {
-    Ok(Func(params:, ..)) -> {
-      case signature.param_names {
-        None -> Ok(list.map(params, fn(_) { None }))
-        Some(param_names) ->
-          case list.length(params) == list.length(param_names) {
-            False -> Error("param_names must match lenght of function params")
-            True -> Ok(list.map(param_names, Some))
-          }
-      }
-      |> result.map(fn(local_names) {
-        ModuleBuilder(
-          ..mb,
-          functions: [
-            FunctionImport(
-              type_index: signature.type_index,
-              name: signature.name,
-              local_names:,
-              from:,
-            ),
-            ..mb.functions
-          ],
-          next_function_index: mb.next_function_index + 1,
-        )
-      })
-    }
-    _ ->
-      Error("Type $" <> int.to_string(signature.type_index) <> " is not a func")
   }
 }
 
@@ -672,6 +695,7 @@ pub fn create_global_builder(
   mutable: Mutability,
   value_type: ValueType,
 ) -> Result(#(ModuleBuilder, CodeBuilder), String) {
+  use _ <- result.try(ensure_types_are_defined([value_type], mb.next_type_index))
   let global = GlobalMissing(name:, mutable:, value_type:)
   let module_builder =
     ModuleBuilder(
@@ -692,6 +716,23 @@ pub fn create_global_builder(
     [value_type],
   )
   |> result.map(fn(builder) { #(module_builder, builder) })
+}
+
+/// Import a global.
+pub fn import_global(
+  mb: ModuleBuilder,
+  name: Option(String),
+  mutable: Mutability,
+  value_type: ValueType,
+  from: ImportSource,
+) -> Result(ModuleBuilder, String) {
+  use _ <- result.map(ensure_types_are_defined([value_type], mb.next_type_index))
+  let global = GlobalImport(name:, mutable:, value_type:, from:)
+  ModuleBuilder(
+    ..mb,
+    globals: [global, ..mb.globals],
+    next_global_index: mb.next_global_index + 1,
+  )
 }
 
 fn create_code_builder(
@@ -1366,7 +1407,11 @@ pub fn add_local(
   t: ValueType,
   name: Option(String),
 ) -> Result(#(CodeBuilder, Int), String) {
-  Ok(#(
+  use _ <- result.map(ensure_types_are_defined(
+    [t],
+    fb.module_builder.next_type_index,
+  ))
+  #(
     CodeBuilder(
       ..fb,
       locals: [t, ..fb.locals],
@@ -1374,7 +1419,7 @@ pub fn add_local(
       next_local_index: fb.next_local_index + 1,
     ),
     fb.next_local_index,
-  ))
+  )
 }
 
 /// Complete the `CodeBuilder` and replace the corresponding placeholder in
@@ -1465,13 +1510,8 @@ pub fn set_start_function(
   mb: ModuleBuilder,
   function_index: Int,
 ) -> Result(ModuleBuilder, String) {
-  use func <- result.try(
-    list_index(mb.functions, { mb.next_function_index - function_index } - 1)
-    |> result.replace_error(
-      "No function at index " <> int.to_string(function_index),
-    ),
-  )
-  get_type_by_index(mb, func.type_index)
+  get_function_by_index(mb, function_index)
+  |> result.try(fn(func) { get_type_by_index(mb, func.type_index) })
   |> result.try(fn(fn_type) {
     case fn_type {
       Func(params: [], result: [], ..) ->
@@ -1488,7 +1528,10 @@ pub fn set_start_function(
 /// Convert the WebAssembly to binary and output to file.
 ///
 /// Assumes the WebAssembly module is valid.
-pub fn emit_module(mb: ModuleBuilder, os: OutputStream(s, e)) -> Result(s, e) {
+pub fn emit_module(
+  mb: ModuleBuilder,
+  os: OutputStream(s, e),
+) -> Result(s, EmissionError(e)) {
   // TODO: validation
 
   let header = <<0x00, 0x61, 0x73, 0x6d>>
@@ -1507,16 +1550,26 @@ pub fn emit_module(mb: ModuleBuilder, os: OutputStream(s, e)) -> Result(s, e) {
     list.reverse(mb.functions)
     |> list.filter_map(fn(func) {
       case func {
-        FunctionImplementation(..) -> Error(Nil)
         FunctionImport(type_index:, from:, ..) ->
           Ok(ImportFunction(from.module, from.name, type_index))
-        FunctionMissing(..) -> Error(Nil)
+        _ -> Error(Nil)
       }
     })
+  let global_imports =
+    list.reverse(mb.globals)
+    |> list.filter_map(fn(global) {
+      case global {
+        GlobalImport(mutable:, value_type:, from:, ..) ->
+          Ok(ImportGlobal(from.module, from.name, mutable:, value_type:))
+        _ -> Error(Nil)
+      }
+    })
+  let imports =
+    list.flatten([func_imports, global_imports])
     |> list.map(encode_import)
   use os <- result.try(write_bytes(
     os,
-    encode_section(section_import, encode_vector(func_imports)),
+    encode_section(section_import, encode_vector(imports)),
   ))
 
   // emit function type declarations
@@ -1606,8 +1659,9 @@ pub fn emit_module(mb: ModuleBuilder, os: OutputStream(s, e)) -> Result(s, e) {
 fn write_bytes(
   os: OutputStream(s, e),
   bytes: BytesTree,
-) -> Result(OutputStream(s, e), e) {
+) -> Result(OutputStream(s, e), EmissionError(e)) {
   os.write_bytes(os.stream, bytes_tree.to_bit_array(bytes))
+  |> result.map_error(OutputStreamError)
   |> result.map(fn(stream) { OutputStream(..os, stream:) })
 }
 
@@ -1740,9 +1794,15 @@ fn encode_import(i: Import) -> BytesTree {
     case i {
       ImportFunction(type_index:, ..) ->
         bytes_tree.prepend(
-          prefix: <<0x00>>,
+          prefix: code_transport_function,
           to: bt(leb128_encode_unsigned(type_index)),
         )
+      ImportGlobal(mutable:, value_type:, ..) ->
+        bytes_tree.append(
+          to: encode_value_type(value_type),
+          suffix: encode_mutability(mutable),
+        )
+        |> bytes_tree.prepend(prefix: code_transport_global)
     },
   ]
   |> bytes_tree.concat
@@ -1767,8 +1827,13 @@ fn encode_export(e: Export) -> BytesTree {
     case e {
       ExportFunction(_, function_index) ->
         bytes_tree.prepend(
-          prefix: <<0x00>>,
+          prefix: code_transport_function,
           to: bt(leb128_encode_unsigned(function_index)),
+        )
+      ExportGlobal(_, global_index) ->
+        bytes_tree.prepend(
+          prefix: code_transport_global,
+          to: bt(leb128_encode_unsigned(global_index)),
         )
     },
   ]
@@ -2130,7 +2195,11 @@ fn encode_names(mb: ModuleBuilder) -> BytesTree {
     list.reverse(mb.functions)
     |> list.index_map(fn(func, index) {
       let local_names =
-        list.index_map(func.local_names, fn(name, index) { #(index, name) })
+        case func {
+          FunctionImplementation(local_names:, ..) ->
+            list.index_map(local_names, fn(name, index) { #(index, name) })
+          _ -> []
+        }
         |> named_only
       #(index, local_names)
     })
@@ -2247,21 +2316,13 @@ const section_import = <<2>>
 
 const section_func = <<3>>
 
-const section_table = <<4>>
-
-const section_memory = <<5>>
-
 const section_global = <<6>>
 
 const section_export = <<7>>
 
 const section_start = <<8>>
 
-const section_element = <<9>>
-
 const section_code = <<10>>
-
-const section_data = <<11>>
 
 const names_subsection_module = <<0>>
 
@@ -2274,6 +2335,10 @@ const names_subsection_type = <<4>>
 const names_subsection_global = <<4>>
 
 const names_subsection_field = <<10>>
+
+const code_transport_function = <<0x00>>
+
+const code_transport_global = <<0x03>>
 
 const code_type_i32 = <<0x7f>>
 

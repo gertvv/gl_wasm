@@ -534,3 +534,58 @@ pub fn func_call_ref_test() {
   wasm.finalize_function(mb, fb)
   |> should.be_ok
 }
+
+pub fn import_function_test() {
+  let mb = wasm.create_module_builder(None)
+  let assert Ok(#(mb, _)) =
+    wasm.add_type(mb, wasm.Func(None, [wasm.I64, wasm.F64], [wasm.F64]))
+  let from = wasm.ImportSource("some_module", "some_function")
+  let assert Ok(mb) = wasm.import_function(mb, 0, None, from)
+  wasm.get_function_by_index(mb, 0)
+  |> should.equal(Ok(wasm.FunctionImport(type_index: 0, name: None, from:)))
+}
+
+pub fn import_non_function_type_test() {
+  let mb = wasm.create_module_builder(None)
+  let assert Ok(#(mb, _)) =
+    wasm.add_type(
+      mb,
+      wasm.Struct(None, [
+        wasm.ValueType(None, wasm.Immutable, wasm.I64),
+        wasm.ValueType(None, wasm.Immutable, wasm.F64),
+      ]),
+    )
+  let from = wasm.ImportSource("some_module", "some_function")
+  wasm.import_function(mb, 0, None, from)
+  |> should.equal(Error("Type $0 is not a func"))
+}
+
+pub fn add_type_refer_undefined_type_test() {
+  let mb = wasm.create_module_builder(None)
+  wasm.add_type(
+    mb,
+    wasm.Struct(None, [
+      wasm.ValueType(
+        None,
+        wasm.Immutable,
+        wasm.Ref(wasm.NonNull(wasm.ConcreteType(1))),
+      ),
+    ]),
+  )
+  |> should.equal(Error("Type $1 not defined"))
+}
+
+pub fn add_type_group_refer_sibling_test() {
+  let mb = wasm.create_module_builder(None)
+  wasm.add_type_group(mb, [
+    wasm.Struct(None, [
+      wasm.ValueType(
+        None,
+        wasm.Immutable,
+        wasm.Ref(wasm.NonNull(wasm.ConcreteType(1))),
+      ),
+    ]),
+    wasm.Func(None, [wasm.I64], [wasm.I64]),
+  ])
+  |> should.be_ok
+}
