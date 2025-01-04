@@ -1,6 +1,6 @@
 import gleam/bytes_tree
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{None}
 import gleam/result
 import gleeunit/should
 import ieee_float

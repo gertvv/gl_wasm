@@ -35,7 +35,7 @@ Create binary WebAssembly modules in Gleam.
  - [x] Building functions
  - [x] Importing functions
  - [x] Exporting functions
- - [ ] Type validation
+ - [x] Type validation
  - [ ] Type recursion and subtyping
  - [x] Global initialization
  - [x] Validation for global initialization
@@ -117,7 +117,7 @@ fn file_output_stream(fname) {
 
 fn generate_wasm() {
   // Create a ModuleBuilder that writes to the file "out.wasm"
-  let mb = wasm.create_module_builder()
+  let mb = wasm.create_module_builder(Some("Doubler"))
   // Register the "add" function type and import "math.add"
   use #(mb, type_index_add) <- result.try(wasm.add_type(
     mb,
@@ -125,7 +125,8 @@ fn generate_wasm() {
   ))
   use mb <- result.try(wasm.import_function(
     mb,
-    wasm.FunctionSignature(type_index_add, Some("add"), Some(["n", "m"])),
+    type_index_add,
+    Some("add"),
     wasm.ImportSource("math", "add"),
   ))
   // Register the "double" function type and generate its code
@@ -154,7 +155,7 @@ fn generate_wasm() {
 The disassembled WebAssembly Text (WAT) representation looks like this:
 
 ```
-(module
+(module $Doubler
  (type $add_type (func (param f64 f64) (result f64)))
  (type $double_type (func (param f64) (result f64)))
  (import "math" "add" (func $add (type $add_type) (param f64 f64) (result f64)))
