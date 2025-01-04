@@ -12,6 +12,64 @@ import gleb128
 import ieee_float.{type IEEEFloat}
 
 // --------------------------------------------------------------------------- 
+// Number types
+// --------------------------------------------------------------------------- 
+
+/// Represents a 32-bit sign-agnostic int.
+pub opaque type Int32 {
+  Int32(int: Int)
+}
+
+/// Represents a 64-bit sign-agnostic int.
+///
+/// It is currently not possible to create the full range of possible Int64
+/// values on the JavaScript target.
+pub opaque type Int64 {
+  Int64(int: Int)
+}
+
+/// Create an Int32 (interpreting the number as unsigned).
+pub fn int32_unsigned(n: Int) -> Result(Int32, String) {
+  case n {
+    n if n < 0 -> Error("Attempted to interpret negative integer as unsigned")
+    n if n > int32_u_max -> Error(int.to_string(n) <> " exceeds int32_u_max")
+    n -> Ok(Int32(n))
+  }
+}
+
+/// Create an Int32 (interpreting the number as signed).
+pub fn int32_signed(n: Int) -> Result(Int32, String) {
+  case n {
+    n if n < int32_s_min -> Error(int.to_string(n) <> " < int32_s_min")
+    n if n > int32_s_max -> Error(int.to_string(n) <> " > int32_s_max")
+    n -> Ok(Int32(n))
+  }
+}
+
+/// Create an Int64 (interpreting the number as unsigned).
+///
+/// Assumes Gleam's Int has at most 64-bit precision.
+pub fn int64_unsigned(n: Int) -> Result(Int64, String) {
+  case n {
+    n if n < 0 -> Error("Attempted to interpret negative integer as unsigned")
+    _ -> Ok(Int64(n))
+  }
+}
+
+/// Create an Int64 (interpreting the number as signed).
+///
+/// Assumes Gleam's Int has at most 64-bit precision.
+pub fn int64_signed(n: Int) -> Result(Int64, String) {
+  Ok(Int64(n))
+}
+
+const int32_u_max = 4_294_967_295
+
+const int32_s_min = -2_147_483_648
+
+const int32_s_max = 2_147_483_647
+
+// --------------------------------------------------------------------------- 
 // Type definitions
 // --------------------------------------------------------------------------- 
 
@@ -119,16 +177,13 @@ pub type GlobalDefinition {
   )
 }
 
-/// Represents an import source.
+/// Represents the source (module and name) of an import.
 pub type ImportSource {
   ImportSource(module: String, name: String)
 }
 
 type Import {
   ImportFunction(module: String, name: String, type_index: Int)
-  // TODO: ImportTable
-  // TODO: ImportMemory
-  // TODO: ImportGlobal
 }
 
 pub type Export {
@@ -261,9 +316,8 @@ pub type Instruction {
   // TODO: memory instructions
   //
   // Numeric instructions
-  // TODO: should I64Const take a BitArray for JavaScript safety?
-  I32Const(value: Int)
-  I64Const(value: Int)
+  I32Const(value: Int32)
+  I64Const(value: Int64)
   F32Const(value: IEEEFloat)
   F64Const(value: IEEEFloat)
   I32EqZ
@@ -1917,12 +1971,12 @@ fn encode_instruction(instr: Instruction) -> BytesTree {
     I32Const(value) ->
       bytes_tree.concat_bit_arrays([
         code_instr_i32_const,
-        gleb128.encode_signed(value),
+        gleb128.encode_signed(value.int),
       ])
     I64Const(value) ->
       bytes_tree.concat_bit_arrays([
         code_instr_i64_const,
-        gleb128.encode_signed(value),
+        gleb128.encode_signed(value.int),
       ])
     F32Const(value) ->
       bytes_tree.concat_bit_arrays([

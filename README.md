@@ -42,7 +42,7 @@ Create binary WebAssembly modules in Gleam.
  - [ ] Advanced validation for break/return
  - [ ] Features related to unimplemented sections
  - [x] Use bytes_tree instead of byte_array.concat & friends
- - [ ] JavaScript target support (primarily number type encoding)
+ - [x] JavaScript target support (primarily number type encoding)
  - [x] Output stream abstraction
 
 ### Sections
@@ -58,7 +58,7 @@ Create binary WebAssembly modules in Gleam.
  - [x] Export
  - [x] Import
  - [ ] Custom
- - [ ] Name
+ - [x] Name
 
 ### Instructions
 

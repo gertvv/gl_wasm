@@ -16,6 +16,16 @@ fn memory_output_stream() {
   )
 }
 
+fn i32_const(n: Int) -> wasm.Instruction {
+  let assert Ok(int32) = wasm.int32_signed(n)
+  wasm.I32Const(int32)
+}
+
+fn i64_const(n: Int) -> wasm.Instruction {
+  let assert Ok(int64) = wasm.int64_signed(n)
+  wasm.I64Const(int64)
+}
+
 fn simple_func(params, result, code) {
   let mb = wasm.create_module_builder(None)
   use #(mb, _) <- result.try(wasm.add_type(mb, wasm.Func(None, params, result)))
@@ -48,17 +58,15 @@ fn prepared_func(mb: wasm.ModuleBuilder, params, result, code) {
 }
 
 pub fn return_const_test() {
-  simple_func([], [wasm.I64], [wasm.I64Const(42), wasm.End])
+  simple_func([], [wasm.I64], [i64_const(42), wasm.End])
   |> result.try(simple_finalize)
   |> should.equal(
-    Ok(
-      wasm.FunctionImplementation(0, None, [], [], [wasm.I64Const(42), wasm.End]),
-    ),
+    Ok(wasm.FunctionImplementation(0, None, [], [], [i64_const(42), wasm.End])),
   )
 }
 
 pub fn finalize_incomplete_function_test() {
-  simple_func([], [wasm.I64], [wasm.I64Const(42)])
+  simple_func([], [wasm.I64], [i64_const(42)])
   |> result.try(simple_finalize)
   |> should.equal(Error("Function incomplete"))
 }
@@ -70,33 +78,33 @@ pub fn missing_return_value_test() {
 }
 
 pub fn incorrect_return_value_test() {
-  simple_func([], [wasm.F64], [wasm.I64Const(42), wasm.End])
+  simple_func([], [wasm.F64], [i64_const(42), wasm.End])
   |> should.equal(Error("Expected f64 at depth 0 but got i64"))
 }
 
 pub fn too_many_return_values_test() {
-  simple_func([], [wasm.I64], [wasm.I64Const(42), wasm.I64Const(42), wasm.End])
+  simple_func([], [wasm.I64], [i64_const(42), i64_const(42), wasm.End])
   |> result.try(simple_finalize)
   |> should.equal(Error("Too many values on the stack"))
 }
 
 pub fn i64_add_test() {
-  let code = [wasm.I64Const(41), wasm.I64Const(1), wasm.I64Add, wasm.End]
+  let code = [i64_const(41), i64_const(1), wasm.I64Add, wasm.End]
   simple_func([], [wasm.I64], code)
   |> result.try(simple_finalize)
   |> should.equal(Ok(wasm.FunctionImplementation(0, None, [], [], code)))
 }
 
 pub fn i64_add_missing_arg_test() {
-  simple_func([], [wasm.I64], [wasm.I64Const(1), wasm.I64Add, wasm.End])
+  simple_func([], [wasm.I64], [i64_const(1), wasm.I64Add, wasm.End])
   |> result.try(simple_finalize)
   |> should.equal(Error("Too few values on the stack"))
 }
 
 pub fn i64_add_incorrect_arg_test() {
   simple_func([], [wasm.I64], [
-    wasm.I32Const(41),
-    wasm.I64Const(1),
+    i32_const(41),
+    i64_const(1),
     wasm.I64Add,
     wasm.End,
   ])
@@ -114,7 +122,7 @@ pub fn block_empty_test() {
 pub fn block_too_many_values_test() {
   simple_func([], [wasm.I64], [
     wasm.Block(wasm.BlockEmpty),
-    wasm.I32Const(42),
+    i32_const(42),
     wasm.End,
   ])
   |> should.equal(Error("Too many values on the stack"))
@@ -123,7 +131,7 @@ pub fn block_too_many_values_test() {
 pub fn block_result_test() {
   let code = [
     wasm.Block(wasm.BlockValue(wasm.I64)),
-    wasm.I64Const(42),
+    i64_const(42),
     wasm.End,
     wasm.End,
   ]
@@ -163,7 +171,7 @@ pub fn local_get_incorrect_type_test() {
 }
 
 pub fn local_set_test() {
-  simple_func([wasm.I64], [], [wasm.I64Const(42), wasm.LocalSet(0), wasm.End])
+  simple_func([wasm.I64], [], [i64_const(42), wasm.LocalSet(0), wasm.End])
   |> result.try(simple_finalize)
   |> should.be_ok
 }
@@ -172,10 +180,10 @@ pub fn break_test() {
   let code = [
     wasm.Block(wasm.BlockValue(wasm.I64)),
     wasm.Block(wasm.BlockEmpty),
-    wasm.I64Const(42),
+    i64_const(42),
     wasm.Break(1),
     wasm.End,
-    wasm.I64Const(42),
+    i64_const(42),
     wasm.End,
     wasm.End,
   ]
@@ -188,12 +196,12 @@ pub fn break_if_test() {
   let code = [
     wasm.Block(wasm.BlockValue(wasm.I64)),
     wasm.Block(wasm.BlockEmpty),
-    wasm.I64Const(42),
+    i64_const(42),
     wasm.LocalGet(0),
     wasm.BreakIf(1),
     wasm.Drop,
     wasm.End,
-    wasm.I64Const(0),
+    i64_const(0),
     wasm.End,
     wasm.End,
   ]
@@ -204,8 +212,8 @@ pub fn break_if_test() {
 
 pub fn operands_outside_frame_test() {
   simple_func([], [wasm.I64], [
-    wasm.I64Const(41),
-    wasm.I64Const(1),
+    i64_const(41),
+    i64_const(1),
     wasm.Block(wasm.BlockEmpty),
     wasm.I64Add,
   ])
@@ -216,9 +224,9 @@ pub fn if_else_test() {
   let code = [
     wasm.LocalGet(0),
     wasm.If(wasm.BlockValue(wasm.I64)),
-    wasm.I64Const(42),
+    i64_const(42),
     wasm.Else,
-    wasm.I64Const(0),
+    i64_const(0),
     wasm.End,
     wasm.End,
   ]
@@ -231,7 +239,7 @@ pub fn if_implicit_else_with_result_test() {
   simple_func([wasm.I32], [wasm.I64], [
     wasm.LocalGet(0),
     wasm.If(wasm.BlockValue(wasm.I64)),
-    wasm.I64Const(42),
+    i64_const(42),
     wasm.End,
   ])
   |> should.equal(Error("Implicit else does not produce a result"))
@@ -241,7 +249,7 @@ pub fn if_implicit_else_without_result_test() {
   simple_func([wasm.I32], [wasm.I64], [
     wasm.LocalGet(0),
     wasm.If(wasm.BlockEmpty),
-    wasm.I64Const(42),
+    i64_const(42),
     wasm.Drop,
     wasm.End,
   ])
@@ -252,9 +260,9 @@ pub fn else_incorrect_type_test() {
   simple_func([wasm.I32], [wasm.I64], [
     wasm.LocalGet(0),
     wasm.If(wasm.BlockValue(wasm.I64)),
-    wasm.I64Const(42),
+    i64_const(42),
     wasm.Else,
-    wasm.I32Const(0),
+    i32_const(0),
     wasm.End,
   ])
   |> should.equal(Error("Expected i64 at depth 0 but got i32"))
@@ -272,7 +280,7 @@ pub fn add_global_test() {
   let mb = wasm.create_module_builder(None)
   let assert Ok(#(mb, gb)) =
     wasm.create_global_builder(mb, None, wasm.Mutable, wasm.I64)
-  let assert Ok(gb) = wasm.add_instruction(gb, wasm.I64Const(12))
+  let assert Ok(gb) = wasm.add_instruction(gb, i64_const(12))
   let assert Ok(gb) = wasm.add_instruction(gb, wasm.End)
   let assert Ok(mb) = wasm.finalize_global(mb, gb)
   prepared_func(mb, [], [], [wasm.GlobalGet(0)])
@@ -283,8 +291,8 @@ pub fn add_global_non_const_expr_test() {
   let mb = wasm.create_module_builder(None)
   let assert Ok(#(_mb, gb)) =
     wasm.create_global_builder(mb, None, wasm.Mutable, wasm.I64)
-  let assert Ok(gb) = wasm.add_instruction(gb, wasm.I64Const(12))
-  let assert Ok(gb) = wasm.add_instruction(gb, wasm.I64Const(12))
+  let assert Ok(gb) = wasm.add_instruction(gb, i64_const(12))
+  let assert Ok(gb) = wasm.add_instruction(gb, i64_const(12))
   wasm.add_instruction(gb, wasm.I64Add)
   |> should.equal(Error(
     "Only constant expressions are allowed in global initializers",
@@ -349,8 +357,8 @@ pub fn struct_new_test() {
     )
   let ref_non_null = wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))
   prepared_func(mb, [], [ref_non_null], [
-    wasm.I32Const(1),
-    wasm.I64Const(2),
+    i32_const(1),
+    i64_const(2),
     wasm.StructNew(0),
     wasm.End,
   ])
@@ -463,7 +471,7 @@ pub fn struct_set_test() {
   let ref_non_null = wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))
   prepared_func(mb, [ref_non_null], [], [
     wasm.LocalGet(0),
-    wasm.I64Const(42),
+    i64_const(42),
     wasm.StructSet(0, 0),
     wasm.End,
   ])
@@ -481,7 +489,7 @@ pub fn struct_set_immutable_test() {
   let ref_non_null = wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))
   prepared_func(mb, [ref_non_null], [], [
     wasm.LocalGet(0),
-    wasm.I64Const(42),
+    i64_const(42),
     wasm.StructSet(0, 0),
   ])
   |> should.equal(Error("struct.set on immutable field"))
@@ -495,7 +503,7 @@ pub fn func_call_test() {
     wasm.create_function_builder(mb, wasm.FunctionSignature(0, None, None))
   let assert Ok(#(mb, fb)) =
     prepared_func(mb, [], [wasm.F64], [
-      wasm.I64Const(42),
+      i64_const(42),
       wasm.F64Const(ieee_float.finite(3.14)),
       wasm.Call(0),
       wasm.End,
@@ -516,7 +524,7 @@ pub fn func_call_ref_test() {
       [wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))],
       [wasm.F64],
       [
-        wasm.I64Const(42),
+        i64_const(42),
         wasm.F64Const(ieee_float.finite(3.14)),
         wasm.LocalGet(0),
         wasm.CallRef(0),
