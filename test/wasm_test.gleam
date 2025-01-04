@@ -589,3 +589,10 @@ pub fn add_type_group_refer_sibling_test() {
   ])
   |> should.be_ok
 }
+
+pub fn emit_empty_module_test() {
+  let mb = wasm.create_module_builder(None)
+  wasm.emit_module(mb, memory_output_stream())
+  |> result.map(bytes_tree.to_bit_array)
+  |> should.equal(Ok(<<0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00>>))
+}

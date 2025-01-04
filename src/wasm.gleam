@@ -1540,10 +1540,7 @@ pub fn emit_module(
 
   // emit types
   let types = list.reverse(mb.types) |> list.map(encode_type_group)
-  use os <- result.try(write_bytes(
-    os,
-    encode_section(section_type, encode_vector(types)),
-  ))
+  use os <- result.try(emit_vector_section_conditional(os, section_type, types))
 
   // emit imports
   let func_imports =
@@ -1567,9 +1564,10 @@ pub fn emit_module(
   let imports =
     list.flatten([func_imports, global_imports])
     |> list.map(encode_import)
-  use os <- result.try(write_bytes(
+  use os <- result.try(emit_vector_section_conditional(
     os,
-    encode_section(section_import, encode_vector(imports)),
+    section_import,
+    imports,
   ))
 
   // emit function type declarations
@@ -1583,9 +1581,10 @@ pub fn emit_module(
         FunctionMissing(..) -> Error(Nil)
       }
     })
-  use os <- result.try(write_bytes(
+  use os <- result.try(emit_vector_section_conditional(
     os,
-    encode_section(section_func, encode_vector(func_types)),
+    section_func,
+    func_types,
   ))
 
   // TODO: emit tables
@@ -1602,18 +1601,20 @@ pub fn emit_module(
         _ -> Error(Nil)
       }
     })
-  use os <- result.try(write_bytes(
+  use os <- result.try(emit_vector_section_conditional(
     os,
-    encode_section(section_global, encode_vector(globals)),
+    section_global,
+    globals,
   ))
 
   // emit exports
   let exports =
     list.reverse(mb.exports)
     |> list.map(encode_export)
-  use os <- result.try(write_bytes(
+  use os <- result.try(emit_vector_section_conditional(
     os,
-    encode_section(section_export, encode_vector(exports)),
+    section_export,
+    exports,
   ))
 
   // emit start section
@@ -1642,18 +1643,31 @@ pub fn emit_module(
         FunctionMissing(..) -> Error(Nil)
       }
     })
-  use os <- result.try(write_bytes(
+  use os <- result.try(emit_vector_section_conditional(
     os,
-    encode_section(section_code, encode_vector(func_codes)),
+    section_code,
+    func_codes,
   ))
 
   // emit names
-  use os <- result.try(write_bytes(
-    os,
-    encode_custom_section("name", encode_names(mb)),
-  ))
+  let names_data = encode_names(mb)
+  use os <- result.map(case bytes_tree.byte_size(names_data) > 0 {
+    True -> write_bytes(os, encode_custom_section("name", encode_names(mb)))
+    False -> Ok(os)
+  })
 
-  Ok(os.stream)
+  os.stream
+}
+
+fn emit_vector_section_conditional(
+  os: OutputStream(s, e),
+  section_id: BitArray,
+  vector: List(BytesTree),
+) -> Result(OutputStream(s, e), EmissionError(e)) {
+  case list.length(vector) > 0 {
+    True -> write_bytes(os, encode_section(section_id, encode_vector(vector)))
+    False -> Ok(os)
+  }
 }
 
 fn write_bytes(
