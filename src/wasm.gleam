@@ -161,8 +161,8 @@ pub type CompositeType {
 /// Field types describe the components of aggregate types (arrays and
 /// structs).
 pub type FieldType {
-  PackedType(mutable: Mutability, PackedType)
-  ValueType(mutable: Mutability, ValueType)
+  PackedType(name: Option(String), mutable: Mutability, packed_type: PackedType)
+  ValueType(name: Option(String), mutable: Mutability, value_type: ValueType)
 }
 
 /// Indicates wheter a field is mutable.
@@ -899,11 +899,11 @@ pub fn add_instruction(
             )
             |> result.try(fn(field) {
               case packed, field {
-                False, PackedType(_, _) ->
+                False, PackedType(..) ->
                   Error("struct.get not applicable to packed fields")
-                False, ValueType(_, ht) -> Ok(ht)
-                True, PackedType(_, _) -> Ok(I32)
-                True, ValueType(_, _) ->
+                False, ValueType(value_type:, ..) -> Ok(value_type)
+                True, PackedType(..) -> Ok(I32)
+                True, ValueType(..) ->
                   Error("struct.get_[s|u] not applicable to value types")
               }
             })
@@ -929,10 +929,11 @@ pub fn add_instruction(
             )
             |> result.try(fn(field) {
               case field {
-                PackedType(Immutable, _) | ValueType(Immutable, _) ->
+                PackedType(mutable: Immutable, ..)
+                | ValueType(mutable: Immutable, ..) ->
                   Error("struct.set on immutable field")
-                PackedType(Mutable, _) -> Ok(I32)
-                ValueType(Mutable, vt) -> Ok(vt)
+                PackedType(mutable: Mutable, ..) -> Ok(I32)
+                ValueType(mutable: Mutable, value_type:, ..) -> Ok(value_type)
               }
             })
           _ ->
@@ -1235,8 +1236,8 @@ fn unpack_struct_fields(
 
 fn unpack_packed_field(ft: FieldType) -> ValueType {
   case ft {
-    PackedType(_, _) -> I32
-    ValueType(_, t) -> t
+    PackedType(..) -> I32
+    ValueType(value_type:, ..) -> value_type
   }
 }
 
@@ -1604,9 +1605,9 @@ fn encode_field_types(fs: List(FieldType)) -> BytesTree {
 
 fn encode_field_type(f: FieldType) -> BytesTree {
   let valtype = case f {
-    PackedType(_, I8) -> bt(code_type_i8)
-    PackedType(_, I16) -> bt(code_type_i16)
-    ValueType(_, value) -> encode_value_type(value)
+    PackedType(packed_type: I8, ..) -> bt(code_type_i8)
+    PackedType(packed_type: I16, ..) -> bt(code_type_i16)
+    ValueType(value_type:, ..) -> encode_value_type(value_type)
   }
   bytes_tree.append(to: valtype, suffix: encode_mutability(f.mutable))
 }
@@ -2024,17 +2025,17 @@ fn encode_names(mb: ModuleBuilder) -> BytesTree {
     })
     |> named_only
     |> encode_name_map
-    |> prepend_byte_size
-    |> bytes_tree.prepend(names_subsection_function)
+    |> encode_name_subsection(names_subsection_function)
 
-  let type_names =
+  let types =
     list.reverse(mb.types)
     |> list.flatten
-    |> list.index_map(fn(t, index) { #(index, t.name) })
+
+  let type_names =
+    list.index_map(types, fn(t, index) { #(index, t.name) })
     |> named_only
     |> encode_name_map
-    |> prepend_byte_size
-    |> bytes_tree.prepend(names_subsection_type)
+    |> encode_name_subsection(names_subsection_type)
 
   let local_names =
     list.reverse(mb.functions)
@@ -2044,18 +2045,37 @@ fn encode_names(mb: ModuleBuilder) -> BytesTree {
         |> named_only
       #(index, local_names)
     })
-    |> list.filter(fn(name_map) {
-      case name_map {
-        #(_, []) -> False
-        _ -> True
-      }
-    })
+    |> indirect_named_only
     |> encode_indirect_name_map
-    |> prepend_byte_size
-    |> bytes_tree.prepend(names_subsection_local)
+    |> encode_name_subsection(names_subsection_local)
 
-  [function_names, local_names, type_names]
+  let field_names =
+    list.index_map(types, fn(t, index) {
+      let field_names =
+        case t {
+          Array(item_type:, ..) -> [#(0, item_type.name)]
+          Func(..) -> []
+          Struct(field_types:, ..) ->
+            list.index_map(field_types, fn(field_type, index) {
+              #(index, field_type.name)
+            })
+        }
+        |> named_only
+      #(index, field_names)
+    })
+    |> indirect_named_only
+    |> encode_indirect_name_map
+    |> encode_name_subsection(names_subsection_field)
+
+  [function_names, local_names, type_names, field_names]
   |> bytes_tree.concat
+}
+
+fn encode_name_subsection(data: BytesTree, subsection_id: BitArray) -> BytesTree {
+  case data == bytes_tree.new() {
+    True -> data
+    False -> data |> prepend_byte_size |> bytes_tree.prepend(subsection_id)
+  }
 }
 
 fn named_only(lst: List(#(Int, Option(String)))) -> List(#(Int, String)) {
@@ -2064,6 +2084,17 @@ fn named_only(lst: List(#(Int, Option(String)))) -> List(#(Int, String)) {
     case name {
       None -> Error(Nil)
       Some(name) -> Ok(#(index, name))
+    }
+  })
+}
+
+fn indirect_named_only(
+  lst: List(#(Int, List(#(Int, String)))),
+) -> List(#(Int, List(#(Int, String)))) {
+  list.filter(lst, fn(name_map) {
+    case name_map {
+      #(_, []) -> False
+      _ -> True
     }
   })
 }

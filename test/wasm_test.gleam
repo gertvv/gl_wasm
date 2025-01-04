@@ -296,7 +296,7 @@ pub fn return_null_struct_ref_test() {
   let assert Ok(#(mb, _)) =
     wasm.add_type(
       mb,
-      wasm.Struct(None, [wasm.ValueType(wasm.Immutable, wasm.I64)]),
+      wasm.Struct(None, [wasm.ValueType(None, wasm.Immutable, wasm.I64)]),
     )
   let struct_ref = wasm.Ref(wasm.Nullable(wasm.ConcreteType(0)))
   prepared_func(mb, [], [struct_ref], [
@@ -312,7 +312,7 @@ pub fn return_incorrect_nullability_test() {
   let assert Ok(#(mb, _)) =
     wasm.add_type(
       mb,
-      wasm.Struct(None, [wasm.ValueType(wasm.Immutable, wasm.I64)]),
+      wasm.Struct(None, [wasm.ValueType(None, wasm.Immutable, wasm.I64)]),
     )
   let ref_nullable = wasm.Ref(wasm.Nullable(wasm.ConcreteType(0)))
   let ref_non_null = wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))
@@ -325,7 +325,7 @@ pub fn ref_as_non_null_test() {
   let assert Ok(#(mb, _)) =
     wasm.add_type(
       mb,
-      wasm.Struct(None, [wasm.ValueType(wasm.Immutable, wasm.I64)]),
+      wasm.Struct(None, [wasm.ValueType(None, wasm.Immutable, wasm.I64)]),
     )
   let ref_nullable = wasm.Ref(wasm.Nullable(wasm.ConcreteType(0)))
   let ref_non_null = wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))
@@ -343,8 +343,8 @@ pub fn struct_new_test() {
     wasm.add_type(
       mb,
       wasm.Struct(None, [
-        wasm.ValueType(wasm.Immutable, wasm.I32),
-        wasm.ValueType(wasm.Immutable, wasm.I64),
+        wasm.ValueType(None, wasm.Immutable, wasm.I32),
+        wasm.ValueType(None, wasm.Immutable, wasm.I64),
       ]),
     )
   let ref_non_null = wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))
@@ -363,8 +363,9 @@ pub fn struct_new_default_test() {
     wasm.add_type(
       mb,
       wasm.Struct(None, [
-        wasm.ValueType(wasm.Immutable, wasm.I32),
+        wasm.ValueType(None, wasm.Immutable, wasm.I32),
         wasm.ValueType(
+          None,
           wasm.Immutable,
           wasm.Ref(wasm.Nullable(wasm.AbstractAny)),
         ),
@@ -381,8 +382,12 @@ pub fn struct_new_non_defaultable_test() {
     wasm.add_type(
       mb,
       wasm.Struct(None, [
-        wasm.ValueType(wasm.Immutable, wasm.I32),
-        wasm.ValueType(wasm.Immutable, wasm.Ref(wasm.NonNull(wasm.AbstractAny))),
+        wasm.ValueType(None, wasm.Immutable, wasm.I32),
+        wasm.ValueType(
+          None,
+          wasm.Immutable,
+          wasm.Ref(wasm.NonNull(wasm.AbstractAny)),
+        ),
       ]),
     )
   let ref_non_null = wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))
@@ -395,13 +400,17 @@ pub fn struct_new_with_subtype_test() {
   let assert Ok(#(mb, _)) =
     wasm.add_type(
       mb,
-      wasm.Struct(None, [wasm.ValueType(wasm.Immutable, wasm.I64)]),
+      wasm.Struct(None, [wasm.ValueType(None, wasm.Immutable, wasm.I64)]),
     )
   let assert Ok(#(mb, _)) =
     wasm.add_type(
       mb,
       wasm.Struct(None, [
-        wasm.ValueType(wasm.Immutable, wasm.Ref(wasm.NonNull(wasm.AbstractAny))),
+        wasm.ValueType(
+          None,
+          wasm.Immutable,
+          wasm.Ref(wasm.NonNull(wasm.AbstractAny)),
+        ),
       ]),
     )
   let ref_non_null = wasm.Ref(wasm.NonNull(wasm.ConcreteType(1)))
@@ -418,7 +427,7 @@ pub fn struct_get_test() {
   let assert Ok(#(mb, _)) =
     wasm.add_type(
       mb,
-      wasm.Struct(None, [wasm.ValueType(wasm.Immutable, wasm.I64)]),
+      wasm.Struct(None, [wasm.ValueType(None, wasm.Immutable, wasm.I64)]),
     )
   let ref_nullable = wasm.Ref(wasm.Nullable(wasm.ConcreteType(0)))
   prepared_func(mb, [ref_nullable], [wasm.I64], [
@@ -435,7 +444,7 @@ pub fn struct_get_non_struct_test() {
   let assert Ok(#(mb, _)) =
     wasm.add_type(
       mb,
-      wasm.Struct(None, [wasm.ValueType(wasm.Immutable, wasm.I64)]),
+      wasm.Struct(None, [wasm.ValueType(None, wasm.Immutable, wasm.I64)]),
     )
   prepared_func(mb, [wasm.I64], [wasm.I64], [
     wasm.LocalGet(0),
@@ -449,7 +458,7 @@ pub fn struct_set_test() {
   let assert Ok(#(mb, _)) =
     wasm.add_type(
       mb,
-      wasm.Struct(None, [wasm.ValueType(wasm.Mutable, wasm.I64)]),
+      wasm.Struct(None, [wasm.ValueType(None, wasm.Mutable, wasm.I64)]),
     )
   let ref_non_null = wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))
   prepared_func(mb, [ref_non_null], [], [
@@ -467,7 +476,7 @@ pub fn struct_set_immutable_test() {
   let assert Ok(#(mb, _)) =
     wasm.add_type(
       mb,
-      wasm.Struct(None, [wasm.ValueType(wasm.Immutable, wasm.I64)]),
+      wasm.Struct(None, [wasm.ValueType(None, wasm.Immutable, wasm.I64)]),
     )
   let ref_non_null = wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))
   prepared_func(mb, [ref_non_null], [], [
