@@ -87,12 +87,12 @@ This example generates a module that imports an "add" function and uses that to
 implement a "double" function which it exports.
 
 ```gleam
+import gl_wasm/wasm
 import gleam/io
 import gleam/list
 import gleam/option.{Some}
 import gleam/result
 import simplifile
-import wasm
 
 pub fn main() {
   case generate_wasm() {
