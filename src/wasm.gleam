@@ -698,6 +698,10 @@ fn get_function(
 /// Add a global to the `ModuleBuilder`.
 ///
 /// Can be done any time before creating a function that uses it.
+///
+/// NOTE: the names sub-section for global names is not part of the current
+/// draft specification. Omit global names if you do not want to emit this
+/// sub-section.
 pub fn create_global_builder(
   mb: ModuleBuilder,
   name: Option(String),
@@ -728,6 +732,10 @@ pub fn create_global_builder(
 }
 
 /// Import a global.
+///
+/// NOTE: the names sub-section for global names is not part of the current
+/// draft specification. Omit global names if you do not want to emit this
+/// sub-section.
 pub fn import_global(
   mb: ModuleBuilder,
   name: Option(String),
