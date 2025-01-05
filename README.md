@@ -5,8 +5,6 @@
 
 Create binary WebAssembly modules in Gleam.
 
-**NOTE**: This package is currently pre-publication.
-
 ## Goals
 
  - Support for the WebAssembly 2.0 (draft) specification, giving priority to
