@@ -64,7 +64,7 @@ Create binary WebAssembly modules in Gleam.
 
  - [x] General control flow
  - [x] Function calls
- - [ ] General reference instructions
+ - [x] General reference instructions
  - [x] Struct
  - [ ] Array
  - [ ] i31

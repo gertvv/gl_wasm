@@ -803,8 +803,13 @@ pub fn add_export(
   mb: ModuleBuilder,
   export: Export,
 ) -> Result(ModuleBuilder, String) {
-  // TODO: validation
-  Ok(ModuleBuilder(..mb, exports: [export, ..mb.exports]))
+  case export {
+    ExportFunction(function_index:, ..) ->
+      get_function_by_index(mb, function_index) |> result.replace(Nil)
+    ExportGlobal(global_index:, ..) ->
+      get_global_by_index(mb, global_index) |> result.replace(Nil)
+  }
+  |> result.replace(ModuleBuilder(..mb, exports: [export, ..mb.exports]))
 }
 
 /// Add an instruction to the `CodeBuilder`.
@@ -874,13 +879,10 @@ pub fn add_instruction(
         Loop(_) -> Ok(#(fb, LabelLoop))
         _ -> pop_push(fb, [I32], []) |> result.map(fn(fb) { #(fb, LabelIf) })
       })
-      CodeBuilder(
-        ..fb,
-        label_stack: [
-          label_maker(list.length(fb.value_stack), result),
-          ..fb.label_stack
-        ],
-      )
+      CodeBuilder(..fb, label_stack: [
+        label_maker(list.length(fb.value_stack), result),
+        ..fb.label_stack
+      ])
     }
     Else -> {
       use new_label <- result.try(case top_label {
@@ -910,6 +912,48 @@ pub fn add_instruction(
       )
       use fb <- result.try(pop_push(fb, [I32], []))
       check_stack_top(fb, break_to.result)
+    }
+    BreakOnNull(label_index) -> {
+      use break_to <- result.try(
+        list_index(fb.label_stack, label_index)
+        |> result.replace_error("Too few labels on the stack"),
+      )
+      use #(fb, vt) <- result.try(
+        stack_top(fb)
+        |> result.try(fn(t) {
+          case t {
+            Ref(Nullable(ht)) ->
+              pop_push(fb, [t], [])
+              |> result.map(fn(fb) { #(fb, Ref(NonNull(ht))) })
+            _ ->
+              Error(
+                "Expected (ref null *) at depth 0 but got "
+                <> value_type_to_string(t),
+              )
+          }
+        }),
+      )
+      check_stack_top(fb, break_to.result)
+      |> result.try(pop_push(_, [], [vt]))
+    }
+    BreakOnNonNull(label_index) -> {
+      use break_to <- result.try(
+        list_index(fb.label_stack, label_index)
+        |> result.replace_error("Too few labels on the stack"),
+      )
+      stack_top(fb)
+      |> result.try(fn(t) {
+        case t {
+          Ref(Nullable(ht)) -> pop_push(fb, [t], [Ref(NonNull(ht))])
+          _ ->
+            Error(
+              "Expected (ref null *) at depth 0 but got "
+              <> value_type_to_string(t),
+            )
+        }
+      })
+      |> result.try(check_stack_top(_, break_to.result))
+      |> result.try(pop_push(_, [Ref(NonNull(AbstractAny))], []))
     }
     Return -> check_stack_top(fb, fb.result)
     Call(index) | CallRef(index) | ReturnCall(index) | ReturnCallRef(index) -> {
@@ -941,8 +985,6 @@ pub fn add_instruction(
         }
       })
     }
-    BreakOnNull(_label_index) -> todo
-    BreakOnNonNull(_label_index) -> todo
     End -> {
       case top_label {
         LabelIf(result: [], ..) -> Ok(fb)
@@ -958,7 +1000,19 @@ pub fn add_instruction(
         False ->
           Ok(CodeBuilder(..fb, value_stack: list.drop(fb.value_stack, 1)))
       }
-    Select(_maybe_types) -> todo
+    Select([]) -> {
+      case available_stack(fb) {
+        Ok([I32, a, b, ..])
+          if a == b
+          && { a == I32 || a == I64 || a == F32 || a == F64 || a == V128 }
+        -> pop_push(fb, [I32, a, a], [a])
+        Ok(_) -> Error("Expected [t t i32] on the stack")
+        Error(msg) -> Error(msg)
+      }
+    }
+    Select([value_type]) ->
+      pop_push(fb, [I32, value_type, value_type], [value_type])
+    Select(_) -> Error("Select is currently valid with length 0 or 1 types")
     RefNull(heap_type) -> pop_push(fb, [], [Ref(Nullable(heap_type))])
     RefFunc(function_index) ->
       get_function(fb, function_index)
