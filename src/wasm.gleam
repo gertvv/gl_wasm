@@ -3,6 +3,7 @@
 //// WebAssembly types and instructions are represented by Gleam types and
 //// validation is performed as the WebAssembly is generated.
 
+import gleam/bool
 import gleam/bytes_tree.{type BytesTree, from_bit_array as bt}
 import gleam/int
 import gleam/list
@@ -655,6 +656,14 @@ pub fn import_function(
   name: Option(String),
   from: ImportSource,
 ) -> Result(ModuleBuilder, String) {
+  use <- bool.guard(
+    case list.first(mb.functions) {
+      Error(Nil) -> False
+      Ok(FunctionImport(..)) -> False
+      Ok(_) -> True
+    },
+    Error("Function imports must occur before implementations"),
+  )
   case get_type_by_index(mb, type_index) {
     Ok(Func(..)) -> {
       Ok(
@@ -726,6 +735,14 @@ pub fn import_global(
   value_type: ValueType,
   from: ImportSource,
 ) -> Result(ModuleBuilder, String) {
+  use <- bool.guard(
+    case list.first(mb.globals) {
+      Error(Nil) -> False
+      Ok(GlobalImport(..)) -> False
+      Ok(_) -> True
+    },
+    Error("Global imports must occur before initializers"),
+  )
   use _ <- result.map(ensure_types_are_defined([value_type], mb.next_type_index))
   let global = GlobalImport(name:, mutable:, value_type:, from:)
   ModuleBuilder(
