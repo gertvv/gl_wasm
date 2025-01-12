@@ -2425,7 +2425,7 @@ const names_subsection_local = <<2>>
 
 const names_subsection_type = <<4>>
 
-const names_subsection_global = <<4>>
+const names_subsection_global = <<7>>
 
 const names_subsection_field = <<10>>
 
