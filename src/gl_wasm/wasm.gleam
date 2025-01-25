@@ -94,7 +94,7 @@ pub opaque type ModuleBuilder {
   ModuleBuilder(
     name: Option(String),
     /// type groups stored in reverse order
-    types: List(List(CompositeType)),
+    types: List(List(SubType)),
     next_type_index: Int,
     /// functions stored in reverse order
     functions: List(FunctionDefinition),
@@ -243,6 +243,11 @@ pub type CompositeType {
 pub type FieldType {
   PackedType(name: Option(String), mutable: Mutability, packed_type: PackedType)
   ValueType(name: Option(String), mutable: Mutability, value_type: ValueType)
+}
+
+pub type SubType {
+  SubOpen(super_types: List(Int), definition: CompositeType)
+  SubFinal(super_types: List(Int), definition: CompositeType)
 }
 
 /// Indicates wheter a field is mutable.
@@ -463,13 +468,21 @@ pub fn get_type_by_index(
   mb: ModuleBuilder,
   index: Int,
 ) -> Result(CompositeType, String) {
+  get_sub_type_by_index(mb, index)
+  |> result.map(strip_sub_type)
+}
+
+pub fn get_sub_type_by_index(
+  mb: ModuleBuilder,
+  index: Int,
+) -> Result(SubType, String) {
   case index < mb.next_type_index {
     True -> get_type_by_index_loop(mb.types, mb.next_type_index - index)
     False -> Error("Type index out of bounds")
   }
 }
 
-fn get_type_by_index_loop(type_groups, index) -> Result(CompositeType, String) {
+fn get_type_by_index_loop(type_groups, index) -> Result(SubType, String) {
   case type_groups {
     [] -> Error("Could not get type by index")
     [group, ..rest] -> {
@@ -477,11 +490,15 @@ fn get_type_by_index_loop(type_groups, index) -> Result(CompositeType, String) {
       case length < index {
         True -> get_type_by_index_loop(rest, index - length)
         False ->
-          list_index(group, index - 1)
+          list_index(group, length - index)
           |> result.replace_error("Could not get type by index")
       }
     }
   }
+}
+
+fn strip_sub_type(t: SubType) -> CompositeType {
+  t.definition
 }
 
 fn list_index(lst: List(a), idx: Int) -> Result(a, Nil) {
@@ -522,15 +539,31 @@ pub fn add_type_group(
   mb: ModuleBuilder,
   group: List(CompositeType),
 ) -> Result(#(ModuleBuilder, List(Int)), String) {
+  let group = list.map(group, fn(t) { SubFinal([], t) })
+  add_sub_type_group(mb, group)
+}
+
+/// Adds a type recursion group with subtypes to the module.
+///
+/// Can be done any time before creating a function that uses it.
+pub fn add_sub_type_group(
+  mb: ModuleBuilder,
+  group: List(SubType),
+) -> Result(#(ModuleBuilder, List(Int)), String) {
   // Check for references to undefined types
   let referenced_types =
     list.flat_map(group, fn(t) {
-      case t {
+      case t.definition {
         Array(item_type:, ..) -> [unpack_packed_field(item_type)]
         Func(params:, result:, ..) -> list.append(result, params)
         Struct(field_types:, ..) -> list.map(field_types, unpack_packed_field)
       }
+      |> list.append(
+        t.super_types |> list.map(fn(i) { Ref(NonNull(ConcreteType(i))) }),
+      )
     })
+  // TODO: additional sub-type validation - no recursion
+
   use _ <- result.map(ensure_types_are_defined(
     referenced_types,
     mb.next_type_index + list.length(group),
@@ -1335,10 +1368,10 @@ fn heap_type_subtype_of(
   is sub: HeapType,
   of sup: HeapType,
 ) -> Bool {
-  // TODO: hierarchies of concrete typyes
   case sub, sup {
     _, _ if sub == sup -> True
     _, AbstractAny -> True
+    ConcreteType(i), ConcreteType(j) -> concrete_type_subtype_of(fb, i, j)
     ConcreteType(i), AbstractArray ->
       get_type(fb, i)
       |> result.map(is_array)
@@ -1376,6 +1409,14 @@ fn heap_type_subtype_of(
       |> result.replace(True)
       |> result.unwrap(False)
     _, _ -> False
+  }
+}
+
+fn concrete_type_subtype_of(cb: CodeBuilder, is sub: Int, of sup: Int) -> Bool {
+  use <- bool.guard(when: sub == sup, return: True)
+  case get_sub_type_by_index(cb.module_builder, sub) {
+    Ok(sub) -> list.any(sub.super_types, concrete_type_subtype_of(cb, _, sup))
+    _ -> False
   }
 }
 
@@ -1853,15 +1894,30 @@ fn encode_result_type(rs: List(ValueType)) -> BytesTree {
   |> encode_vector
 }
 
-fn encode_type_group(ts: List(CompositeType)) -> BytesTree {
+fn encode_type_group(ts: List(SubType)) -> BytesTree {
   case ts {
-    [t] -> encode_typedef(t)
+    [SubFinal([], t)] -> encode_typedef(t)
     _ ->
       bytes_tree.prepend(
         prefix: code_type_rec,
-        to: encode_vector(list.map(ts, encode_typedef)),
+        to: encode_vector(list.map(ts, encode_subtype)),
       )
   }
+}
+
+fn encode_subtype(t: SubType) -> BytesTree {
+  let enc_def = encode_typedef(t.definition)
+  let enc_sup =
+    t.super_types
+    |> list.map(leb128_encode_unsigned)
+    |> list.map(bt)
+    |> encode_vector
+  case t {
+    SubFinal(super_types: [], ..) -> [enc_def]
+    SubOpen(..) -> [bt(code_type_sub_open), enc_sup, enc_def]
+    SubFinal(..) -> [bt(code_type_sub_final), enc_sup, enc_def]
+  }
+  |> bytes_tree.concat
 }
 
 fn encode_typedef(t: CompositeType) -> BytesTree {
@@ -2279,7 +2335,7 @@ fn encode_names(mb: ModuleBuilder) -> BytesTree {
     |> list.flatten
 
   let type_names =
-    list.index_map(types, fn(t, index) { #(index, t.name) })
+    list.index_map(types, fn(t, index) { #(index, t.definition.name) })
     |> named_only
     |> encode_name_map
     |> encode_name_subsection(names_subsection_type)
@@ -2310,7 +2366,7 @@ fn encode_names(mb: ModuleBuilder) -> BytesTree {
   let field_names =
     list.index_map(types, fn(t, index) {
       let field_names =
-        case t {
+        case strip_sub_type(t) {
           Array(item_type:, ..) -> [#(0, item_type.name)]
           Func(..) -> []
           Struct(field_types:, ..) ->
@@ -2478,6 +2534,10 @@ const code_type_struct = <<0x5f>>
 const code_type_array = <<0x5e>>
 
 const code_type_rec = <<0x4e>>
+
+const code_type_sub_final = <<0x4f>>
+
+const code_type_sub_open = <<0x50>>
 
 const code_type_empty = <<0x40>>
 

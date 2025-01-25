@@ -365,6 +365,25 @@ pub fn struct_new_test() {
   |> should.be_ok
 }
 
+pub fn struct_subtype_test() {
+  let mb = wasm.create_module_builder(None)
+  let assert Ok(#(mb, _)) =
+    wasm.add_sub_type_group(mb, [
+      wasm.SubOpen([], wasm.Struct(None, [])),
+      wasm.SubFinal(
+        [0],
+        wasm.Struct(None, [wasm.ValueType(None, wasm.Immutable, wasm.I32)]),
+      ),
+    ])
+  let ref_non_null_0 = wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))
+  prepared_func(mb, [], [ref_non_null_0], [
+    i32_const(1),
+    wasm.StructNew(1),
+    wasm.End,
+  ])
+  |> should.be_ok
+}
+
 pub fn struct_new_default_test() {
   let mb = wasm.create_module_builder(None)
   let assert Ok(#(mb, _)) =
