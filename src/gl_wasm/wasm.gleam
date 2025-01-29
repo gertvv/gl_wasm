@@ -1833,10 +1833,10 @@ fn leb128_encode_unsigned(u: Int) -> BitArray {
 
 fn encode_value_type(t: ValueType) -> BytesTree {
   case t {
-    F32 -> bt(code_type_i32)
-    F64 -> bt(code_type_i64)
-    I32 -> bt(code_type_f32)
-    I64 -> bt(code_type_f64)
+    I32 -> bt(code_type_i32)
+    I64 -> bt(code_type_i64)
+    F32 -> bt(code_type_f32)
+    F64 -> bt(code_type_f64)
     Ref(NonNull(heap_type)) ->
       bytes_tree.prepend(
         prefix: code_ref_non_null,
@@ -1997,9 +1997,20 @@ fn encode_function_code(
   locals: List(ValueType),
   code: List(Instruction),
 ) -> BytesTree {
-  [encode_result_type(locals), ..list.map(code, encode_instruction)]
+  [encode_locals(locals), ..list.map(code, encode_instruction)]
   |> bytes_tree.concat
   |> prepend_byte_size
+}
+
+fn encode_locals(locals: List(ValueType)) -> BytesTree {
+  // TODO: optimize this - should be run-length encoded
+  list.map(locals, fn(local) {
+    bytes_tree.prepend(
+      to: encode_value_type(local),
+      prefix: leb128_encode_unsigned(1),
+    )
+  })
+  |> encode_vector
 }
 
 fn encode_instruction(instr: Instruction) -> BytesTree {
