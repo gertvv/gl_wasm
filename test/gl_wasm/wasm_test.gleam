@@ -1,7 +1,9 @@
 import gl_wasm/wasm
+import gleam/bit_array
 import gleam/bytes_tree
+import gleam/io
 import gleam/list
-import gleam/option.{None}
+import gleam/option.{None, Some}
 import gleam/result
 import gleeunit/should
 import ieee_float
@@ -609,9 +611,102 @@ pub fn add_type_group_refer_sibling_test() {
   |> should.be_ok
 }
 
+const magic = <<0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00>>
+
 pub fn emit_empty_module_test() {
   let mb = wasm.create_module_builder(None)
   wasm.emit_module(mb, memory_output_stream())
   |> result.map(bytes_tree.to_bit_array)
-  |> should.equal(Ok(<<0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00>>))
+  |> should.equal(Ok(magic))
+}
+
+pub fn emit_basic_function_test() {
+  // sec id = 1, size = 7 bytes, len = 1
+  let type_sec_header = <<0x01, 0x07, 0x01>>
+  // 0x60, n = 2 params, i64, i64, n = 1 result, i64 
+  let func_type = <<0x60, 0x02, 0x7e, 0x7e, 0x01, 0x7e>>
+  // sec id = 3, size = 2, len = 1, type id = 0
+  let func_sec = <<0x03, 0x02, 0x01, 0x00>>
+  // sec id = 10, size = 9 bytes, len = 1
+  let code_sec_header = <<0x0a, 0x09, 0x01>>
+  // size = 7 bytes, 0 locals, local.get 0, local.get 1, i64.add, end
+  let func_code = <<0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x7c, 0x0b>>
+
+  simple_func([wasm.I64, wasm.I64], [wasm.I64], [
+    wasm.LocalGet(0),
+    wasm.LocalGet(1),
+    wasm.I64Add,
+    wasm.End,
+  ])
+  |> result.try(fn(pair) {
+    let #(mb, fb) = pair
+    wasm.finalize_function(mb, fb)
+  })
+  |> result.map_error(wasm.ValidationError)
+  |> result.try(wasm.emit_module(_, memory_output_stream()))
+  |> result.map(bytes_tree.to_bit_array)
+  |> should.equal(
+    Ok(<<
+      magic:bits,
+      type_sec_header:bits,
+      func_type:bits,
+      func_sec:bits,
+      code_sec_header:bits,
+      func_code:bits,
+    >>),
+  )
+}
+
+pub fn emit_basic_function_with_names_test() {
+  // type, func, code (as previous test but s/i64/f64/)
+  let regular_sections = <<
+    0x01, 0x07, 0x01, 0x60, 0x02, 0x7c, 0x7c, 0x01, 0x7c, 0x03, 0x02, 0x01, 0x00,
+    0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0xa0, 0x0b,
+  >>
+  // sec id = 0, size = 38 bytes(?), len = 4, "name"
+  let name_sec_header = <<0x00, 0x26, 0x04, "name":utf8>>
+  // module subsection: id = 0, size = 8 bytes, len = 7, "add_f64"
+  let name_sub_module = <<0x00, 0x08, 0x07, "add_f64":utf8>>
+  // function subsection: id = 1, size = 4 bytes, 1 assoc, func id 0, len = 1, "f"
+  let name_sub_function = <<0x01, 0x04, 0x01, 0x00, 0x01, "f":utf8>>
+  // local subsection: id = 2, size = 9, 1 assoc, func id 0, 2 assocs, local 0, len = 1, "x"
+  let name_sub_locals = <<
+    0x02, 0x09, 0x01, 0x00, 0x02, 0x00, 0x01, "x":utf8, 0x01, 0x01, "y":utf8,
+  >>
+  // type subsection: id = 4, size = 4, 1 assoc, type id 0, len = 1, "t"
+  let name_sub_types = <<0x04, 0x04, 0x01, 0x00, 0x01, "t":utf8>>
+
+  let mb = wasm.create_module_builder(Some("add_f64"))
+  wasm.add_type(mb, wasm.Func(Some("t"), [wasm.F64, wasm.F64], [wasm.F64]))
+  |> result.map(fn(res) {
+    let #(mb, _index) = res
+    mb
+  })
+  |> result.try(wasm.create_function_builder(
+    _,
+    wasm.FunctionSignature(0, Some("f"), Some(["x", "y"])),
+  ))
+  |> result.try(fn(res) {
+    let #(mb, fb) = res
+    list.try_fold(
+      [wasm.LocalGet(0), wasm.LocalGet(1), wasm.F64Add, wasm.End],
+      fb,
+      wasm.add_instruction,
+    )
+    |> result.try(wasm.finalize_function(mb, _))
+  })
+  |> result.map_error(wasm.ValidationError)
+  |> result.try(wasm.emit_module(_, memory_output_stream()))
+  |> result.map(bytes_tree.to_bit_array)
+  |> should.equal(
+    Ok(<<
+      magic:bits,
+      regular_sections:bits,
+      name_sec_header:bits,
+      name_sub_module:bits,
+      name_sub_function:bits,
+      name_sub_locals:bits,
+      name_sub_types:bits,
+    >>),
+  )
 }
