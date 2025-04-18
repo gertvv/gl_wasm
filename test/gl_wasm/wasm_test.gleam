@@ -2,7 +2,9 @@ import gl_wasm/wasm
 import gleam/bytes_tree
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/pair
 import gleam/result
+import gleb128
 import gleeunit/should
 import ieee_float
 
@@ -714,4 +716,113 @@ pub fn emit_basic_function_with_names_test() {
       name_sub_types:bits,
     >>),
   )
+}
+
+pub fn emit_locals_and_blocks_test() {
+  let assert Ok(zero) = wasm.int32_unsigned(0)
+  let assert Ok(one) = wasm.int32_unsigned(1)
+  let mb = wasm.create_module_builder(None)
+  wasm.add_type(mb, wasm.Func(None, [wasm.I32], [wasm.I32]))
+  |> result.map(pair.first)
+  |> result.try(wasm.create_function_builder(
+    _,
+    wasm.FunctionSignature(0, None, None),
+  ))
+  |> result.try(fn(res) {
+    // Add two locals
+    let #(mb, fb) = res
+    wasm.add_local(fb, wasm.I32, None)
+    |> result.map(pair.first)
+    |> result.try(wasm.add_local(_, wasm.I32, None))
+    |> result.map(pair.first)
+    |> result.map(pair.new(mb, _))
+  })
+  |> result.try(fn(res) {
+    let #(mb, fb) = res
+    list.try_fold(
+      [
+        wasm.I32Const(zero),
+        wasm.LocalSet(1),
+        wasm.I32Const(one),
+        wasm.LocalSet(2),
+        wasm.Block(wasm.BlockEmpty),
+        wasm.Loop(wasm.BlockEmpty),
+        wasm.LocalGet(0),
+        wasm.I32EqZ,
+        wasm.BreakIf(1),
+        wasm.LocalGet(2),
+        wasm.LocalGet(1),
+        wasm.LocalGet(2),
+        wasm.I32Add,
+        wasm.LocalSet(2),
+        wasm.LocalSet(1),
+        wasm.LocalGet(0),
+        wasm.I32Const(one),
+        wasm.I32Sub,
+        wasm.LocalSet(0),
+        wasm.Break(0),
+        wasm.End,
+        wasm.Unreachable,
+        wasm.End,
+        wasm.LocalGet(1),
+        wasm.End,
+      ],
+      fb,
+      wasm.add_instruction,
+    )
+    |> result.try(wasm.finalize_function(mb, _))
+  })
+  |> result.try(wasm.add_export(_, wasm.ExportFunction("fib", 0)))
+  |> result.map_error(wasm.ValidationError)
+  |> result.try(wasm.emit_module(_, memory_output_stream()))
+  |> result.map(bytes_tree.to_bit_array)
+  |> result.map(section_content(_, 10))
+  |> should.equal(
+    Ok(<<
+      // one func, 46 bytes, locals = 2xi32
+      0x01, 0x2e, 0x01, 0x02, 0x7f,
+      // i32.const 0, set 1, i32.const 1, set 2
+      0x41, 0x00, 0x21, 0x01, 0x41, 0x01, 0x21, 0x02,
+      // block empty, loop empty, get 0, i32.eqz, br_if 1
+      0x02, 0x40, 0x03, 0x40, 0x20, 0x00, 0x45, 0x0d, 0x01,
+      // get 2, get 1, get 2, i32.add, set 2, set 1
+      0x20, 0x02, 0x20, 0x01, 0x20, 0x02, 0x6a, 0x21, 0x02, 0x21, 0x01,
+      // get 0, i32.const 1, i32.sub, set 0
+      0x20, 0x00, 0x41, 0x01, 0x6b, 0x21, 0x00,
+      // break 0, end, unreachable, end, get 1, end
+      0x0c, 0x00, 0x0b, 0x00, 0x0b, 0x20, 0x01, 0x0b,
+    >>),
+  )
+}
+
+fn section_content(wasm: BitArray, section_id: Int) -> BitArray {
+  case wasm {
+    <<header:size(64)-bits, rest:bits>> if header == magic ->
+      do_section_content(rest, section_id)
+    _ -> <<>>
+  }
+}
+
+fn do_section_content(wasm: BitArray, section_id: Int) -> BitArray {
+  case wasm {
+    <<id:size(8), rest:bits>> if id >= 0 && id <= 12 -> {
+      gleb128.decode_unsigned(rest)
+      |> result.map(fn(size) {
+        let #(bytes, count) = size
+        let bits = bytes * 8
+        let count_bits = count * 8
+        case rest {
+          <<_size:size(count_bits)-bits, content:size(bits)-bits, rest:bits>> -> {
+            case id == section_id {
+              True -> content
+              False -> do_section_content(rest, section_id)
+            }
+          }
+          _ -> <<>>
+        }
+      })
+      |> result.unwrap(<<>>)
+    }
+    _ -> <<>>
+  }
 }

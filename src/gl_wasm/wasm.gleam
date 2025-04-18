@@ -2003,14 +2003,25 @@ fn encode_function_code(
 }
 
 fn encode_locals(locals: List(ValueType)) -> BytesTree {
-  // TODO: optimize this - should be run-length encoded
-  list.map(locals, fn(local) {
+  rle(locals)
+  |> list.map(fn(local) {
+    let #(type_, count) = local
     bytes_tree.prepend(
-      to: encode_value_type(local),
-      prefix: leb128_encode_unsigned(1),
+      to: encode_value_type(type_),
+      prefix: leb128_encode_unsigned(count),
     )
   })
   |> encode_vector
+}
+
+fn rle(l: List(a)) -> List(#(a, Int)) {
+  list.fold(l, [], fn(acc, item) {
+    case acc {
+      [#(prev, count), ..rest] if prev == item -> [#(item, count + 1), ..rest]
+      rest -> [#(item, 1), ..rest]
+    }
+  })
+  |> list.reverse
 }
 
 fn encode_instruction(instr: Instruction) -> BytesTree {
