@@ -1827,7 +1827,10 @@ fn encode_vector(data: List(BytesTree)) -> BytesTree {
 fn leb128_encode_unsigned(u: Int) -> BitArray {
   case gleb128.encode_unsigned(u) {
     Ok(val) -> val
-    Error(msg) -> panic as msg
+    Error(_) ->
+      panic as {
+        "Unable to encode " <> int.to_string(u) <> " as unsigned leb128"
+      }
   }
 }
 
