@@ -1,7 +1,5 @@
 import gl_wasm/wasm
-import gleam/bit_array
 import gleam/bytes_tree
-import gleam/io
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
@@ -627,6 +625,10 @@ pub fn emit_basic_function_test() {
   let func_type = <<0x60, 0x02, 0x7e, 0x7e, 0x01, 0x7e>>
   // sec id = 3, size = 2, len = 1, type id = 0
   let func_sec = <<0x03, 0x02, 0x01, 0x00>>
+  // sec id = 7, size = 8 bytes, len = 1
+  let export_sec_header = <<0x07, 0x08, 0x01>>
+  // export len = 4, "plus", func (0), id = 0
+  let func_export = <<0x04, "plus":utf8, 0x00, 0x00>>
   // sec id = 10, size = 9 bytes, len = 1
   let code_sec_header = <<0x0a, 0x09, 0x01>>
   // size = 7 bytes, 0 locals, local.get 0, local.get 1, i64.add, end
@@ -642,6 +644,7 @@ pub fn emit_basic_function_test() {
     let #(mb, fb) = pair
     wasm.finalize_function(mb, fb)
   })
+  |> result.try(wasm.add_export(_, wasm.ExportFunction("plus", 0)))
   |> result.map_error(wasm.ValidationError)
   |> result.try(wasm.emit_module(_, memory_output_stream()))
   |> result.map(bytes_tree.to_bit_array)
@@ -651,6 +654,8 @@ pub fn emit_basic_function_test() {
       type_sec_header:bits,
       func_type:bits,
       func_sec:bits,
+      export_sec_header:bits,
+      func_export:bits,
       code_sec_header:bits,
       func_code:bits,
     >>),
@@ -658,7 +663,7 @@ pub fn emit_basic_function_test() {
 }
 
 pub fn emit_basic_function_with_names_test() {
-  // type, func, code (as previous test but s/i64/f64/)
+  // type, func, code (as previous test but s/i64/f64/ and without the export)
   let regular_sections = <<
     0x01, 0x07, 0x01, 0x60, 0x02, 0x7c, 0x7c, 0x01, 0x7c, 0x03, 0x02, 0x01, 0x00,
     0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0xa0, 0x0b,
