@@ -1,9 +1,11 @@
 import gl_wasm/wasm
+import gleam/bit_array
 import gleam/bytes_tree
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/pair
 import gleam/result
+import gleam/string
 import gleb128
 import gleeunit/should
 import ieee_float
@@ -791,6 +793,109 @@ pub fn emit_locals_and_blocks_test() {
       0x20, 0x00, 0x41, 0x01, 0x6b, 0x21, 0x00,
       // break 0, end, unreachable, end, get 1, end
       0x0c, 0x00, 0x0b, 0x00, 0x0b, 0x20, 0x01, 0x0b,
+    >>),
+  )
+}
+
+pub fn emit_reftypes_and_global_import_test() {
+  let any_ref = wasm.Ref(wasm.NonNull(wasm.AbstractAny))
+  let maybe_list_ref = wasm.Ref(wasm.Nullable(wasm.ConcreteType(0)))
+  let list_ref = wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))
+  let mb = wasm.create_module_builder(None)
+  // define the list type, the reducer type, and the fold type
+  wasm.add_type(
+    mb,
+    wasm.Struct(None, [
+      wasm.ValueType(None, wasm.Immutable, any_ref),
+      wasm.ValueType(None, wasm.Immutable, maybe_list_ref),
+    ]),
+  )
+  |> result.map(pair.first)
+  |> result.try(wasm.add_type(_, wasm.Func(None, [any_ref, any_ref], [any_ref])))
+  |> result.map(pair.first)
+  |> result.try(wasm.add_type(
+    _,
+    wasm.Func(
+      None,
+      [list_ref, any_ref, wasm.Ref(wasm.NonNull(wasm.ConcreteType(1)))],
+      [any_ref],
+    ),
+  ))
+  |> result.map(pair.first)
+  |> result.try(wasm.import_global(
+    _,
+    None,
+    wasm.Immutable,
+    list_ref,
+    wasm.ImportSource("runtime", "empty_list"),
+  ))
+  |> result.try(wasm.create_function_builder(
+    _,
+    wasm.FunctionSignature(2, None, None),
+  ))
+  |> result.try(fn(res) {
+    let #(mb, fb) = res
+    list.try_fold(
+      [
+        wasm.GlobalGet(0),
+        wasm.LocalGet(0),
+        wasm.RefEq,
+        wasm.If(wasm.BlockEmpty),
+        wasm.LocalGet(1),
+        wasm.Return,
+        wasm.Else,
+        wasm.LocalGet(0),
+        wasm.StructGet(0, 1),
+        wasm.RefAsNonNull,
+        wasm.LocalGet(1),
+        wasm.LocalGet(0),
+        wasm.StructGet(0, 0),
+        wasm.LocalGet(2),
+        wasm.CallRef(1),
+        wasm.LocalGet(2),
+        wasm.ReturnCall(0),
+        wasm.End,
+        wasm.Unreachable,
+        wasm.End,
+      ],
+      fb,
+      wasm.add_instruction,
+    )
+    |> result.try(wasm.finalize_function(mb, _))
+  })
+  |> result.try(wasm.add_export(_, wasm.ExportFunction("fold", 0)))
+  |> result.map_error(wasm.ValidationError)
+  |> result.try(wasm.emit_module(_, memory_output_stream()))
+  |> result.map(bytes_tree.to_bit_array)
+  |> should.equal(
+    Ok(<<
+      // magic
+      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+      // type section, 29 bytes, len = 3
+      0x01, 0x1d, 0x03,
+      // type 0 - struct, 2 members, non-null any const, nullable ref 0 const
+      0x5f, 0x02, 0x64, 0x6e, 0x00, 0x63, 0x00, 0x00,
+      // type 1 - func, 2 params, non-null any, non-null any, 1 result, non-null any
+      0x60, 0x02, 0x64, 0x6e, 0x64, 0x6e, 0x01, 0x64, 0x6e,
+      // type 2 - func, 3 params, non-null 0, non-null any, non-null 1, 1 result non-null any
+      0x60, 0x03, 0x64, 0x00, 0x64, 0x6e, 0x64, 0x01, 0x01, 0x64, 0x6e,
+      // import section, 24 bytes, len = 1
+      0x02, 0x18, 0x01,
+      // module name (7 bytes)
+      0x07, 0x72, 0x75, 0x6e, 0x74, 0x69, 0x6d, 0x65,
+      // import name (10 bytes)
+      0x0a, 0x65, 0x6d, 0x70, 0x74, 0x79, 0x5f, 0x6c, 0x69, 0x73, 0x74,
+      // imported type - global non-null 0 const
+      0x03, 0x64, 0x00, 0x00,
+      // function section
+      0x03, 0x02, 0x01, 0x02,
+      // export section
+      0x07, 0x08, 0x01, 0x04, 0x66, 0x6f, 0x6c, 0x64, 0x00, 0x00,
+      // code section
+      0x0a, 0x28, 0x01, 0x26, 0x00, 0x23, 0x00, 0x20, 0x00, 0xd3, 0x04, 0x40,
+      0x20, 0x01, 0x0f, 0x05, 0x20, 0x00, 0xfb, 0x02, 0x00, 0x01, 0xd4, 0x20,
+      0x01, 0x20, 0x00, 0xfb, 0x02, 0x00, 0x00, 0x20, 0x02, 0x14, 0x01, 0x20,
+      0x02, 0x12, 0x00, 0x0b, 0x00, 0x0b,
     >>),
   )
 }

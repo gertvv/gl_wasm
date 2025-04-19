@@ -988,7 +988,7 @@ pub fn add_instruction(
       |> result.try(check_stack_top(_, break_to.result))
       |> result.try(pop_push(_, [Ref(NonNull(AbstractAny))], []))
     }
-    Return -> check_stack_top(fb, fb.result)
+    Return -> pop_push(fb, fb.result, [])
     Call(index) | CallRef(index) | ReturnCall(index) | ReturnCallRef(index) -> {
       let #(is_return, is_ref) = case instr {
         Call(_) -> #(False, False)
@@ -1013,7 +1013,7 @@ pub fn add_instruction(
       })
       |> result.try(fn(fb) {
         case is_return {
-          True -> check_stack_top(fb, fb.result)
+          True -> pop_push(fb, fb.result, [])
           False -> Ok(fb)
         }
       })
