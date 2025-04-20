@@ -76,10 +76,6 @@ Create binary WebAssembly modules in Gleam.
  - [ ] Numeric conversions, truncations, etc.
  - [ ] v128
 
-### Consistency
-
- - [ ] Rename Break* to Branch*
-
 ## Usage
 
 ```sh

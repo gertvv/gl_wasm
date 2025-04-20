@@ -290,8 +290,12 @@ pub type Instruction {
   Loop(block_type: BlockType)
   If(block_type: BlockType)
   Else
+  @deprecated("Use Branch instead")
   Break(label_index: Int)
+  Branch(label_index: Int)
+  @deprecated("Use BranchIf instead")
   BreakIf(label_index: Int)
+  BranchIf(label_index: Int)
   // TODO: BreakTable
   Return
   Call(function_index: Int)
@@ -300,8 +304,12 @@ pub type Instruction {
   // TODO: ReturnCallIndirect
   CallRef(type_index: Int)
   ReturnCallRef(type_index: Int)
+  @deprecated("Use BranchOnNull instead")
   BreakOnNull(label_index: Int)
+  BranchOnNull(label_index: Int)
+  @deprecated("Use BranchOnNonNull instead")
   BreakOnNonNull(label_index: Int)
+  BranchOnNonNull(label_index: Int)
   // TODO: BreakOnCast*
   End
   //
@@ -941,7 +949,7 @@ pub fn add_instruction(
         )
       })
     }
-    Break(label_index) -> {
+    Break(label_index) | Branch(label_index) -> {
       use break_to <- result.try(
         list_index(fb.label_stack, label_index)
         |> result.replace_error("Too few labels on the stack"),
@@ -949,7 +957,7 @@ pub fn add_instruction(
       pop_push(fb, break_to.result, [])
       |> result.try(unreachable)
     }
-    BreakIf(label_index) -> {
+    BreakIf(label_index) | BranchIf(label_index) -> {
       use break_to <- result.try(
         list_index(fb.label_stack, label_index)
         |> result.replace_error("Too few labels on the stack"),
@@ -957,7 +965,7 @@ pub fn add_instruction(
       use fb <- result.try(pop_push(fb, [I32], []))
       check_stack_top(fb, break_to.result)
     }
-    BreakOnNull(label_index) -> {
+    BreakOnNull(label_index) | BranchOnNull(label_index) -> {
       use break_to <- result.try(
         list_index(fb.label_stack, label_index)
         |> result.replace_error("Too few labels on the stack"),
@@ -980,7 +988,7 @@ pub fn add_instruction(
       check_stack_top(fb, break_to.result)
       |> result.try(pop_push(_, [], [vt]))
     }
-    BreakOnNonNull(label_index) -> {
+    BreakOnNonNull(label_index) | BranchOnNonNull(label_index) -> {
       use break_to <- result.try(
         list_index(fb.label_stack, label_index)
         |> result.replace_error("Too few labels on the stack"),
@@ -2078,12 +2086,12 @@ fn encode_instruction(instr: Instruction) -> BytesTree {
         to: encode_block_type(block_type),
       )
     Else -> bt(code_instr_else)
-    Break(label_index) ->
+    Break(label_index) | Branch(label_index) ->
       bytes_tree.concat_bit_arrays([
         code_instr_break,
         leb128_encode_unsigned(label_index),
       ])
-    BreakIf(label_index) ->
+    BreakIf(label_index) | BranchIf(label_index) ->
       bytes_tree.concat_bit_arrays([
         code_instr_break_if,
         leb128_encode_unsigned(label_index),
@@ -2111,12 +2119,12 @@ fn encode_instruction(instr: Instruction) -> BytesTree {
         code_instr_return_call_ref,
         leb128_encode_unsigned(type_index),
       ])
-    BreakOnNull(label_index) ->
+    BreakOnNull(label_index) | BranchOnNull(label_index) ->
       bytes_tree.concat_bit_arrays([
         code_instr_break_on_null,
         leb128_encode_unsigned(label_index),
       ])
-    BreakOnNonNull(label_index) ->
+    BreakOnNonNull(label_index) | BranchOnNonNull(label_index) ->
       bytes_tree.concat_bit_arrays([
         code_instr_break_on_non_null,
         leb128_encode_unsigned(label_index),
