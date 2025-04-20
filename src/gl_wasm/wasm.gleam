@@ -118,9 +118,14 @@ pub opaque type CodeBuilder {
     local_names: List(Option(String)),
     next_local_index: Int,
     code: List(Instruction),
-    value_stack: List(ValueType),
+    value_stack: List(StackValueType),
     label_stack: List(Label),
   )
+}
+
+type StackValueType {
+  Unknown
+  Known(ValueType)
 }
 
 pub type BuildType {
@@ -267,7 +272,8 @@ type Label {
   Label(
     kind: LabelKind,
     stack_limit: Int,
-    result: List(ValueType),
+    params: List(StackValueType),
+    result: List(StackValueType),
     unreachable: Bool,
   )
 }
@@ -290,10 +296,10 @@ pub type Instruction {
   Loop(block_type: BlockType)
   If(block_type: BlockType)
   Else
-  @deprecated("Use Branch instead")
+  // FIXME: @deprecated("Use Branch instead")
   Break(label_index: Int)
   Branch(label_index: Int)
-  @deprecated("Use BranchIf instead")
+  // FIXME: @deprecated("Use BranchIf instead")
   BreakIf(label_index: Int)
   BranchIf(label_index: Int)
   // TODO: BreakTable
@@ -304,10 +310,10 @@ pub type Instruction {
   // TODO: ReturnCallIndirect
   CallRef(type_index: Int)
   ReturnCallRef(type_index: Int)
-  @deprecated("Use BranchOnNull instead")
+  // FIXME: @deprecated("Use BranchOnNull instead")
   BreakOnNull(label_index: Int)
   BranchOnNull(label_index: Int)
-  @deprecated("Use BranchOnNonNull instead")
+  // FIXME: @deprecated("Use BranchOnNonNull instead")
   BreakOnNonNull(label_index: Int)
   BranchOnNonNull(label_index: Int)
   // TODO: BreakOnCast*
@@ -818,8 +824,22 @@ fn create_code_builder(
   result,
 ) -> Result(CodeBuilder, String) {
   let top_label = case builds {
-    BuildFunction(..) -> Label(LabelFunc, 0, result, False)
-    BuildGlobal(..) -> Label(LabelInitializer, 0, result, False)
+    BuildFunction(..) ->
+      Label(
+        LabelFunc,
+        0,
+        list.map(params, Known),
+        list.map(result, Known),
+        False,
+      )
+    BuildGlobal(..) ->
+      Label(
+        LabelInitializer,
+        0,
+        list.map(params, Known),
+        list.map(result, Known),
+        False,
+      )
   }
   case list.length(params) == list.length(param_names) {
     False -> Error("param_names must have same lenght as params")
@@ -870,9 +890,9 @@ pub fn add_instruction(
   instr: Instruction,
 ) -> Result(CodeBuilder, String) {
   // Retrieve the top label
-  use #(top_label, bottom_labels) <- result.try(case fb.label_stack {
+  use top_label <- result.try(case fb.label_stack {
     [] -> Error("Attempted to add instruction to ended function")
-    [head, ..tail] -> Ok(#(head, tail))
+    [head, ..] -> Ok(head)
   })
   // If we're building a global initializer, check that the expression is
   // constant.
@@ -927,10 +947,19 @@ pub fn add_instruction(
       use #(fb, label_kind) <- result.map(case instr {
         Block(_) -> Ok(#(fb, LabelBlock))
         Loop(_) -> Ok(#(fb, LabelLoop))
-        _ -> pop_push(fb, [I32], []) |> result.map(fn(fb) { #(fb, LabelIf) })
+        _ -> {
+          use #(fb, _popped) <- result.map(pop_one(fb, Known(I32)))
+          #(fb, LabelIf)
+        }
       })
       CodeBuilder(..fb, label_stack: [
-        Label(label_kind, list.length(fb.value_stack), result, False),
+        Label(
+          label_kind,
+          list.length(fb.value_stack),
+          [],
+          list.map(result, Known),
+          False,
+        ),
         ..fb.label_stack
       ])
     }
@@ -940,13 +969,9 @@ pub fn add_instruction(
           Ok(Label(..top_label, kind: LabelElse, unreachable: False))
         _ -> Error("Else must follow If")
       })
-      check_stack_top_exact(fb, top_label.result)
+      pop_label(fb)
       |> result.map(fn(fb) {
-        CodeBuilder(
-          ..fb,
-          value_stack: list.drop(fb.value_stack, list.length(top_label.result)),
-          label_stack: [new_label, ..bottom_labels],
-        )
+        CodeBuilder(..fb, label_stack: [new_label, ..fb.label_stack])
       })
     }
     Break(label_index) | Branch(label_index) -> {
@@ -954,16 +979,18 @@ pub fn add_instruction(
         list_index(fb.label_stack, label_index)
         |> result.replace_error("Too few labels on the stack"),
       )
-      pop_push(fb, break_to.result, [])
-      |> result.try(unreachable)
+      use #(fb, _popped) <- result.try(pop_many(fb, break_to.result))
+      unreachable(fb)
     }
     BreakIf(label_index) | BranchIf(label_index) -> {
       use break_to <- result.try(
         list_index(fb.label_stack, label_index)
         |> result.replace_error("Too few labels on the stack"),
       )
-      use fb <- result.try(pop_push(fb, [I32], []))
-      check_stack_top(fb, break_to.result)
+      // TODO: support loop params
+      use #(fb, _popped) <- result.try(pop_one(fb, Known(I32)))
+      use #(fb, _popped) <- result.map(pop_many(fb, break_to.result))
+      push_many(fb, break_to.result)
     }
     BreakOnNull(label_index) | BranchOnNull(label_index) -> {
       use break_to <- result.try(
@@ -971,43 +998,52 @@ pub fn add_instruction(
         |> result.replace_error("Too few labels on the stack"),
       )
       use #(fb, vt) <- result.try(
+        // TODO: rewrite using pop_one
         stack_top(fb)
         |> result.try(fn(t) {
           case t {
-            Ref(Nullable(ht)) ->
+            Known(Ref(Nullable(ht))) ->
               pop_push(fb, [t], [])
               |> result.map(fn(fb) { #(fb, Ref(NonNull(ht))) })
-            _ ->
+            Known(t) ->
               Error(
                 "Expected (ref null *) at depth 0 but got "
                 <> value_type_to_string(t),
               )
+            Unknown -> todo
           }
         }),
       )
-      check_stack_top(fb, break_to.result)
-      |> result.try(pop_push(_, [], [vt]))
+      use #(fb, _popped) <- result.map(pop_many(fb, break_to.result))
+      let fb = push_many(fb, break_to.result)
+      push_one(fb, Known(vt))
     }
     BreakOnNonNull(label_index) | BranchOnNonNull(label_index) -> {
       use break_to <- result.try(
         list_index(fb.label_stack, label_index)
         |> result.replace_error("Too few labels on the stack"),
       )
-      stack_top(fb)
-      |> result.try(fn(t) {
-        case t {
-          Ref(Nullable(ht)) -> pop_push(fb, [t], [Ref(NonNull(ht))])
-          _ ->
-            Error(
-              "Expected (ref null *) at depth 0 but got "
-              <> value_type_to_string(t),
-            )
-        }
-      })
-      |> result.try(check_stack_top(_, break_to.result))
-      |> result.try(pop_push(_, [Ref(NonNull(AbstractAny))], []))
+      // TODO: rewrite using pop_one
+      use fb <- result.try(
+        stack_top(fb)
+        |> result.try(fn(t) {
+          case t {
+            Known(Ref(Nullable(ht))) ->
+              pop_push(fb, [t], [Known(Ref(NonNull(ht)))])
+            Known(t) ->
+              Error(
+                "Expected (ref null *) at depth 0 but got "
+                <> value_type_to_string(t),
+              )
+            Unknown -> todo
+          }
+        }),
+      )
+      use #(fb, _popped) <- result.map(pop_many(fb, break_to.result))
+      let fb = push_many(fb, break_to.result)
+      push_one(fb, Known(Ref(NonNull(AbstractAny))))
     }
-    Return -> pop_push(fb, fb.result, [])
+    Return -> pop_push_known(fb, fb.result, [])
     Call(index) | CallRef(index) | ReturnCall(index) | ReturnCallRef(index) -> {
       let #(is_return, is_ref) = case instr {
         Call(_) -> #(False, False)
@@ -1028,11 +1064,11 @@ pub fn add_instruction(
           False -> list.reverse(params)
           True -> [Ref(NonNull(ConcreteType(index))), ..list.reverse(params)]
         }
-        pop_push(fb, to_pop, result)
+        pop_push_known(fb, to_pop, result)
       })
       |> result.try(fn(fb) {
         case is_return {
-          True -> pop_push(fb, fb.result, [])
+          True -> pop_push_known(fb, fb.result, [])
           False -> Ok(fb)
         }
       })
@@ -1044,8 +1080,8 @@ pub fn add_instruction(
           Error("Implicit else does not produce a result")
         _ -> Ok(fb)
       }
-      |> result.try(check_stack_top_exact(_, top_label.result))
-      |> result.map(fn(fb) { CodeBuilder(..fb, label_stack: bottom_labels) })
+      |> result.try(pop_label)
+      |> result.map(push_many(_, top_label.result))
     }
     Drop ->
       case list.length(fb.value_stack) < top_label.stack_limit + 1 {
@@ -1055,40 +1091,44 @@ pub fn add_instruction(
       }
     Select([]) -> {
       case available_stack(fb) {
-        Ok([I32, a, b, ..])
+        Ok([Known(I32), Known(a), Known(b), ..])
           if a == b
           && { a == I32 || a == I64 || a == F32 || a == F64 || a == V128 }
-        -> pop_push(fb, [I32, a, a], [a])
+        -> pop_push_known(fb, [I32, a, a], [a])
         Ok(_) -> Error("Expected [t t i32] on the stack")
         Error(msg) -> Error(msg)
       }
     }
     Select([value_type]) ->
-      pop_push(fb, [I32, value_type, value_type], [value_type])
+      pop_push_known(fb, [I32, value_type, value_type], [value_type])
     Select(_) -> Error("Select is currently valid with length 0 or 1 types")
-    RefNull(heap_type) -> pop_push(fb, [], [Ref(Nullable(heap_type))])
+    RefNull(heap_type) -> pop_push_known(fb, [], [Ref(Nullable(heap_type))])
     RefFunc(function_index) ->
       get_function(fb, function_index)
       |> result.map(fn(fd) { ConcreteType(fd.type_index) })
-      |> result.try(fn(ht) { pop_push(fb, [], [Ref(NonNull(ht))]) })
-    RefIsNull -> pop_push(fb, [Ref(Nullable(AbstractAny))], [I32])
+      |> result.try(fn(ht) { pop_push_known(fb, [], [Ref(NonNull(ht))]) })
+    RefIsNull -> pop_push_known(fb, [Ref(Nullable(AbstractAny))], [I32])
     RefAsNonNull -> {
       stack_top(fb)
       |> result.try(fn(t) {
         case t {
-          Ref(Nullable(ht)) -> pop_push(fb, [t], [Ref(NonNull(ht))])
-          _ ->
+          Known(Ref(Nullable(ht))) ->
+            pop_push(fb, [t], [Known(Ref(NonNull(ht)))])
+          Known(t) ->
             Error(
               "Expected (ref null *) at depth 0 but got "
               <> value_type_to_string(t),
             )
+          Unknown -> todo
         }
       })
     }
     RefEq ->
-      pop_push(fb, [Ref(Nullable(AbstractAny)), Ref(Nullable(AbstractAny))], [
-        I32,
-      ])
+      pop_push_known(
+        fb,
+        [Ref(Nullable(AbstractAny)), Ref(Nullable(AbstractAny))],
+        [I32],
+      )
     RefTest(ref_type) | RefCast(ref_type) -> {
       let result = case instr {
         RefTest(_) -> [I32]
@@ -1096,29 +1136,36 @@ pub fn add_instruction(
       }
       stack_top(fb)
       |> result.try(fn(t) {
-        case value_type_subtype_of(fb, is: Ref(ref_type), of: t) {
-          True -> pop_push(fb, [t], result)
-          False ->
-            Error(
-              "Expected a supertype of "
-              <> value_type_to_string(Ref(ref_type))
-              <> " at depth 0 but got "
-              <> value_type_to_string(t),
-            )
+        case t {
+          Known(t) ->
+            case value_type_subtype_of(fb, is: Ref(ref_type), of: t) {
+              True -> pop_push_known(fb, [t], result)
+              False ->
+                Error(
+                  "Expected a supertype of "
+                  <> value_type_to_string(Ref(ref_type))
+                  <> " at depth 0 but got "
+                  <> value_type_to_string(t),
+                )
+            }
+          Unknown -> todo
         }
       })
     }
     StructNew(type_index) -> {
       get_type(fb, type_index)
       |> result.try(unpack_struct_fields(_, type_index))
-      |> result.try(pop_push(fb, _, [Ref(NonNull(ConcreteType(type_index)))]))
+      |> result.try(
+        pop_push_known(fb, _, [Ref(NonNull(ConcreteType(type_index)))]),
+      )
     }
     StructNewDefault(type_index) -> {
       get_type(fb, type_index)
       |> result.try(unpack_struct_fields(_, type_index))
       |> result.try(fn(fields) {
         case list.all(fields, value_type_is_defaultable) {
-          True -> pop_push(fb, [], [Ref(NonNull(ConcreteType(type_index)))])
+          True ->
+            pop_push_known(fb, [], [Ref(NonNull(ConcreteType(type_index)))])
           False ->
             Error(
               "Struct type $"
@@ -1162,7 +1209,7 @@ pub fn add_instruction(
         }
       })
       |> result.try(fn(t) {
-        pop_push(fb, [Ref(Nullable(ConcreteType(type_index)))], [t])
+        pop_push_known(fb, [Ref(Nullable(ConcreteType(type_index)))], [t])
       })
     }
     StructSet(type_index, field_index) ->
@@ -1191,20 +1238,20 @@ pub fn add_instruction(
         }
       })
       |> result.try(fn(t) {
-        pop_push(fb, [t, Ref(Nullable(ConcreteType(type_index)))], [])
+        pop_push_known(fb, [t, Ref(Nullable(ConcreteType(type_index)))], [])
       })
     LocalGet(local_index) ->
       get_local(fb, local_index)
-      |> result.try(fn(t) { pop_push(fb, [], [t]) })
+      |> result.try(fn(t) { pop_push_known(fb, [], [t]) })
     LocalSet(local_index) ->
       get_local(fb, local_index)
-      |> result.try(fn(t) { pop_push(fb, [t], []) })
+      |> result.try(fn(t) { pop_push_known(fb, [t], []) })
     LocalTee(local_index) ->
       get_local(fb, local_index)
-      |> result.try(fn(t) { pop_push(fb, [t], [t]) })
+      |> result.try(fn(t) { pop_push_known(fb, [t], [t]) })
     GlobalGet(global_index) ->
       get_global(fb, global_index)
-      |> result.try(fn(g) { pop_push(fb, [], [g.value_type]) })
+      |> result.try(fn(g) { pop_push_known(fb, [], [g.value_type]) })
     GlobalSet(global_index) ->
       get_global(fb, global_index)
       |> result.try(fn(g) {
@@ -1213,12 +1260,12 @@ pub fn add_instruction(
           Immutable -> Error("global.set on an immutable global")
         }
       })
-      |> result.try(fn(t) { pop_push(fb, [t], []) })
-    I32Const(_) -> pop_push(fb, [], [I32])
-    I64Const(_) -> pop_push(fb, [], [I64])
-    F32Const(_) -> pop_push(fb, [], [F32])
-    F64Const(_) -> pop_push(fb, [], [F64])
-    I32EqZ -> pop_push(fb, [I32], [I32])
+      |> result.try(fn(t) { pop_push_known(fb, [t], []) })
+    I32Const(_) -> pop_push_known(fb, [], [I32])
+    I64Const(_) -> pop_push_known(fb, [], [I64])
+    F32Const(_) -> pop_push_known(fb, [], [F32])
+    F64Const(_) -> pop_push_known(fb, [], [F64])
+    I32EqZ -> pop_push_known(fb, [I32], [I32])
     I32Eq
     | I32NE
     | I32LtS
@@ -1228,8 +1275,8 @@ pub fn add_instruction(
     | I32LeS
     | I32LeU
     | I32GeS
-    | I32GeU -> pop_push(fb, [I32, I32], [I32])
-    I64EqZ -> pop_push(fb, [I64], [I32])
+    | I32GeU -> pop_push_known(fb, [I32, I32], [I32])
+    I64EqZ -> pop_push_known(fb, [I64], [I32])
     I64Eq
     | I64NE
     | I64LtS
@@ -1239,12 +1286,12 @@ pub fn add_instruction(
     | I64LeS
     | I64LeU
     | I64GeS
-    | I64GeU -> pop_push(fb, [I64, I64], [I32])
+    | I64GeU -> pop_push_known(fb, [I64, I64], [I32])
     F32Eq | F32NE | F32Lt | F32Gt | F32Le | F32Ge ->
-      pop_push(fb, [F32, F32], [I32])
+      pop_push_known(fb, [F32, F32], [I32])
     F64Eq | F64NE | F64Lt | F64Gt | F64Le | F64Ge ->
-      pop_push(fb, [F64, F64], [I32])
-    I32CntLZ | I32CntTZ | I32PopCnt -> pop_push(fb, [I32], [I32])
+      pop_push_known(fb, [F64, F64], [I32])
+    I32CntLZ | I32CntTZ | I32PopCnt -> pop_push_known(fb, [I32], [I32])
     I32Add
     | I32Sub
     | I32Mul
@@ -1259,8 +1306,8 @@ pub fn add_instruction(
     | I32ShRS
     | I32ShLU
     | I32RotL
-    | I32RotR -> pop_push(fb, [I32, I32], [I32])
-    I64CntLZ | I64CntTZ | I64PopCnt -> pop_push(fb, [I64], [I64])
+    | I32RotR -> pop_push_known(fb, [I32, I32], [I32])
+    I64CntLZ | I64CntTZ | I64PopCnt -> pop_push_known(fb, [I64], [I64])
     I64Add
     | I64Sub
     | I64Mul
@@ -1275,15 +1322,15 @@ pub fn add_instruction(
     | I64ShRS
     | I64ShLU
     | I64RotL
-    | I64RotR -> pop_push(fb, [I64, I64], [I64])
+    | I64RotR -> pop_push_known(fb, [I64, I64], [I64])
     F32Abs | F32Neg | F32Ceil | F32Floor | F32Trunc | F32Nearest | F32Sqrt ->
-      pop_push(fb, [F32], [F32])
+      pop_push_known(fb, [F32], [F32])
     F32Add | F32Sub | F32Mul | F32Div | F32Min | F32Max | F32CopySign ->
-      pop_push(fb, [F32, F32], [F32])
+      pop_push_known(fb, [F32, F32], [F32])
     F64Abs | F64Neg | F64Ceil | F64Floor | F64Trunc | F64Nearest | F64Sqrt ->
-      pop_push(fb, [F64], [F64])
+      pop_push_known(fb, [F64], [F64])
     F64Add | F64Sub | F64Mul | F64Div | F64Min | F64Max | F64CopySign ->
-      pop_push(fb, [F64, F64], [F64])
+      pop_push_known(fb, [F64, F64], [F64])
   }
   |> result.map(fn(fb) { CodeBuilder(..fb, code: [instr, ..fb.code]) })
 }
@@ -1316,68 +1363,82 @@ fn get_local(fb: CodeBuilder, local_index: Int) -> Result(ValueType, String) {
   )
 }
 
-fn pop_push(fb: CodeBuilder, pop, push) {
-  check_stack_top(fb, pop)
-  |> result.try(fn(fb) {
-    // if we are in unreachable code, we can pop virtual frames beyond the
-    // available stack, but they don't come off the actual stack
-    use cnt <- result.map(available_stack_count(fb))
-    CodeBuilder(
-      ..fb,
-      value_stack: list.append(
-        push,
-        list.drop(fb.value_stack, int.min(list.length(pop), cnt)),
-      ),
-    )
-  })
-}
-
-fn check_stack_top_exact(
+fn pop_one(
   fb: CodeBuilder,
-  expected: List(ValueType),
-) -> Result(CodeBuilder, String) {
-  use stack <- result.try(available_stack(fb))
-  case list.length(stack) > list.length(expected) {
-    True -> Error("Too many values on the stack")
-    False -> check_stack_top_loop(fb, stack, expected, 0)
-  }
-  |> result.replace(fb)
-}
-
-fn check_stack_top(
-  fb: CodeBuilder,
-  expected: List(ValueType),
-) -> Result(CodeBuilder, String) {
-  use stack <- result.try(available_stack(fb))
-  check_stack_top_loop(fb, stack, expected, 0)
-  |> result.replace(fb)
-}
-
-fn check_stack_top_loop(
-  fb: CodeBuilder,
-  stack: List(ValueType),
-  expected: List(ValueType),
-  depth: Int,
-) -> Result(Nil, String) {
-  case top_label(fb), expected, stack {
-    Ok(_), [exp, ..exp_rest], [act, ..act_rest] -> {
+  expected: StackValueType,
+) -> Result(#(CodeBuilder, StackValueType), String) {
+  use label <- result.try(top_label(fb))
+  let available = list.length(fb.value_stack) - label.stack_limit
+  use #(fb, actual) <- result.try(
+    case available, label.unreachable, fb.value_stack {
+      n, _, [sv, ..rest] if n > 0 ->
+        Ok(#(CodeBuilder(..fb, value_stack: rest), sv))
+      _, True, _ -> Ok(#(fb, Unknown))
+      _, _, _ -> Error("Too few values on the stack")
+    },
+  )
+  case expected, actual {
+    Known(exp), Known(act) ->
       case value_type_subtype_of(fb, is: act, of: exp) {
-        True -> check_stack_top_loop(fb, act_rest, exp_rest, depth + 1)
+        True -> Ok(#(fb, actual))
         False ->
           Error(
             "Expected "
             <> value_type_to_string(exp)
-            <> " at depth "
-            <> int.to_string(depth)
+            <> " at height "
+            <> int.to_string(available - 1)
             <> " but got "
             <> value_type_to_string(act),
           )
       }
+    Unknown, _ | _, Unknown -> Ok(#(fb, actual))
+  }
+}
+
+fn pop_many(fb, expected) {
+  list.try_fold(expected, #(fb, []), fn(acc, expected) {
+    let #(fb, popped) = acc
+    case pop_one(fb, expected) {
+      Ok(#(fb, actual)) -> Ok(#(fb, [actual, ..popped]))
+      Error(msg) -> Error(msg)
     }
-    Ok(Label(unreachable: True, ..)), _, _ -> Ok(Nil)
-    Ok(_), [], _ -> Ok(Nil)
-    Ok(_), [_exp, ..], [] -> Error("Too few values on the stack")
-    Error(msg), _, _ -> Error(msg)
+  })
+}
+
+fn push_one(fb, val) {
+  CodeBuilder(..fb, value_stack: [val, ..fb.value_stack])
+}
+
+fn push_many(fb, vals) {
+  CodeBuilder(..fb, value_stack: list.append(vals, fb.value_stack))
+}
+
+fn pop_push_known(fb: CodeBuilder, pop: List(ValueType), push: List(ValueType)) {
+  pop_push(fb, list.map(pop, Known), list.map(push, Known))
+}
+
+fn pop_push(
+  fb: CodeBuilder,
+  to_pop: List(StackValueType),
+  to_push: List(StackValueType),
+) {
+  pop_many(fb, to_pop)
+  |> result.map(fn(res) {
+    let #(fb, _popped) = res
+    push_many(fb, to_push)
+  })
+}
+
+fn pop_label(fb: CodeBuilder) -> Result(CodeBuilder, String) {
+  case fb.label_stack {
+    [label, ..rest] -> {
+      use #(fb, _popped) <- result.try(pop_many(fb, label.result))
+      case list.length(fb.value_stack) == label.stack_limit {
+        True -> Ok(CodeBuilder(..fb, label_stack: rest))
+        False -> Error("Too many values on the stack")
+      }
+    }
+    [] -> Error("Label stack is empty")
   }
 }
 
@@ -1474,7 +1535,7 @@ fn is_func(t: CompositeType) -> Bool {
   }
 }
 
-fn stack_top(fb: CodeBuilder) -> Result(ValueType, String) {
+fn stack_top(fb: CodeBuilder) -> Result(StackValueType, String) {
   use stack <- result.try(available_stack(fb))
   case stack {
     [] -> Error("Too few values on the stack")
@@ -1489,7 +1550,7 @@ fn top_label(fb: CodeBuilder) -> Result(Label, String) {
   }
 }
 
-fn available_stack(fb: CodeBuilder) -> Result(List(ValueType), String) {
+fn available_stack(fb: CodeBuilder) -> Result(List(StackValueType), String) {
   available_stack_count(fb)
   |> result.map(list.take(fb.value_stack, _))
 }

@@ -81,7 +81,7 @@ pub fn missing_return_value_test() {
 
 pub fn incorrect_return_value_test() {
   simple_func([], [wasm.F64], [i64_const(42), wasm.End])
-  |> should.equal(Error("Expected f64 at depth 0 but got i64"))
+  |> should.equal(Error("Expected f64 at height 0 but got i64"))
 }
 
 pub fn too_many_return_values_test() {
@@ -111,7 +111,7 @@ pub fn i64_add_incorrect_arg_test() {
     wasm.End,
   ])
   |> result.try(simple_finalize)
-  |> should.equal(Error("Expected i64 at depth 1 but got i32"))
+  |> should.equal(Error("Expected i64 at height 0 but got i32"))
 }
 
 pub fn block_empty_test() {
@@ -169,7 +169,7 @@ pub fn local_get_oob_test() {
 pub fn local_get_incorrect_type_test() {
   simple_func([wasm.I32], [wasm.I64], [wasm.LocalGet(0), wasm.End])
   |> result.try(simple_finalize)
-  |> should.equal(Error("Expected i64 at depth 0 but got i32"))
+  |> should.equal(Error("Expected i64 at height 0 but got i32"))
 }
 
 pub fn local_set_test() {
@@ -267,7 +267,7 @@ pub fn else_incorrect_type_test() {
     i32_const(0),
     wasm.End,
   ])
-  |> should.equal(Error("Expected i64 at depth 0 but got i32"))
+  |> should.equal(Error("Expected i64 at height 0 but got i32"))
 }
 
 pub fn if_must_produce_result_test() {
@@ -349,7 +349,7 @@ pub fn unexpected_type_after_unreachable_test() {
   ]
   simple_func([], [], code)
   |> result.try(simple_finalize)
-  |> should.equal(Error("Expected i32 at depth 0 but got i64"))
+  |> should.equal(Error("Expected i32 at height 0 but got i64"))
 }
 
 pub fn add_local_test() {
@@ -409,7 +409,7 @@ pub fn return_incorrect_nullability_test() {
   let ref_nullable = wasm.Ref(wasm.Nullable(wasm.ConcreteType(0)))
   let ref_non_null = wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))
   prepared_func(mb, [ref_nullable], [ref_non_null], [wasm.LocalGet(0), wasm.End])
-  |> should.equal(Error("Expected (ref $0) at depth 0 but got (ref null $0)"))
+  |> should.equal(Error("Expected (ref $0) at height 0 but got (ref null $0)"))
 }
 
 pub fn ref_as_non_null_test() {
@@ -561,7 +561,7 @@ pub fn struct_get_non_struct_test() {
     wasm.LocalGet(0),
     wasm.StructGet(0, 0),
   ])
-  |> should.equal(Error("Expected (ref null $0) at depth 0 but got i64"))
+  |> should.equal(Error("Expected (ref null $0) at height 0 but got i64"))
 }
 
 pub fn struct_set_test() {
