@@ -38,6 +38,7 @@ Create binary WebAssembly modules in Gleam.
  - [x] Global initialization
  - [x] Validation for global initialization
  - [ ] Advanced validation for break/return
+ - [ ] [Function-typed blocks](https://webassembly.github.io/spec/core/syntax/instructions.html#control-instructions)
  - [ ] Features related to unimplemented sections
  - [x] Use bytes_tree instead of byte_array.concat & friends
  - [x] JavaScript target support (primarily number type encoding)
@@ -74,6 +75,10 @@ Create binary WebAssembly modules in Gleam.
  - [x] Common i32, i64, f32, f64 instructions
  - [ ] Numeric conversions, truncations, etc.
  - [ ] v128
+
+### Consistency
+
+ - [ ] Rename Break* to Branch*
 
 ## Usage
 
