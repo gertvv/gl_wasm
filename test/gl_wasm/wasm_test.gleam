@@ -1,11 +1,9 @@
 import gl_wasm/wasm
-import gleam/bit_array
 import gleam/bytes_tree
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/pair
 import gleam/result
-import gleam/string
 import gleb128
 import gleeunit/should
 import ieee_float
@@ -270,6 +268,88 @@ pub fn else_incorrect_type_test() {
     wasm.End,
   ])
   |> should.equal(Error("Expected i64 at depth 0 but got i32"))
+}
+
+pub fn if_must_produce_result_test() {
+  let code = [
+    wasm.Block(wasm.BlockValue(wasm.I64)),
+    wasm.LocalGet(0),
+    wasm.I64EqZ,
+    wasm.If(wasm.BlockEmpty),
+    i64_const(42),
+    wasm.Else,
+  ]
+  simple_func([wasm.I64], [wasm.I64], code)
+  |> should.equal(Error("Too many values on the stack"))
+}
+
+pub fn block_requires_explicit_unreachable_test() {
+  let code = [
+    wasm.Block(wasm.BlockValue(wasm.I64)),
+    wasm.LocalGet(0),
+    wasm.I64EqZ,
+    wasm.If(wasm.BlockEmpty),
+    i64_const(42),
+    wasm.Break(1),
+    wasm.Else,
+    i64_const(42),
+    wasm.Break(1),
+    wasm.End,
+    wasm.End,
+  ]
+  simple_func([wasm.I64], [wasm.I64], code)
+  |> should.equal(Error("Too few values on the stack"))
+}
+
+pub fn block_with_unreachable_test() {
+  let code = [
+    wasm.Block(wasm.BlockValue(wasm.I64)),
+    wasm.LocalGet(0),
+    wasm.I64EqZ,
+    wasm.If(wasm.BlockEmpty),
+    i64_const(42),
+    wasm.Break(1),
+    wasm.Else,
+    i64_const(42),
+    wasm.Break(1),
+    wasm.End,
+    wasm.Unreachable,
+    wasm.End,
+    wasm.End,
+  ]
+  simple_func([wasm.I64], [wasm.I64], code)
+  |> result.try(simple_finalize)
+  |> should.be_ok
+}
+
+pub fn instr_after_unreachable_test() {
+  let code = [
+    wasm.Block(wasm.BlockEmpty),
+    wasm.Unreachable,
+    wasm.I32Add,
+    wasm.Drop,
+    // TODO: wasm.Drop,
+    wasm.End,
+    wasm.End,
+  ]
+  simple_func([], [], code)
+  |> result.try(simple_finalize)
+  |> should.be_ok
+}
+
+pub fn unexpected_type_after_unreachable_test() {
+  let assert Ok(one) = wasm.int64_signed(1)
+  let code = [
+    wasm.Block(wasm.BlockEmpty),
+    wasm.Unreachable,
+    wasm.I64Const(one),
+    wasm.I32Add,
+    wasm.End,
+    wasm.End,
+  ]
+  simple_func([], [], code)
+  |> result.try(simple_finalize)
+  |> should.equal(Error("Expected i32 at depth 0 but got i64"))
 }
 
 pub fn add_local_test() {

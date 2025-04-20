@@ -33,7 +33,7 @@ pub opaque type Int64 {
 pub fn int32_unsigned(n: Int) -> Result(Int32, String) {
   case n {
     n if n < 0 -> Error("Attempted to interpret negative integer as unsigned")
-    n if n > int32_u_max -> Error(int.to_string(n) <> " exceeds int32_u_max")
+    n if n > int32_u_max -> Error(int.to_string(n) <> " > int32_u_max")
     n -> Ok(Int32(n))
   }
 }
@@ -264,12 +264,21 @@ pub type PackedType {
 
 /// Labels keep track of the scope (block/frame).
 type Label {
-  LabelInitializer(stack_limit: Int, result: List(ValueType))
-  LabelFunc(stack_limit: Int, result: List(ValueType))
-  LabelBlock(stack_limit: Int, result: List(ValueType))
-  LabelLoop(stack_limit: Int, result: List(ValueType))
-  LabelIf(stack_limit: Int, result: List(ValueType))
-  LabelElse(stack_limit: Int, result: List(ValueType))
+  Label(
+    kind: LabelKind,
+    stack_limit: Int,
+    result: List(ValueType),
+    unreachable: Bool,
+  )
+}
+
+type LabelKind {
+  LabelInitializer
+  LabelFunction
+  LabelBlock
+  LabelLoop
+  LabelIf
+  LabelElse
 }
 
 /// WebAssembly instructions (code).
@@ -801,8 +810,8 @@ fn create_code_builder(
   result,
 ) -> Result(CodeBuilder, String) {
   let top_label = case builds {
-    BuildFunction(..) -> LabelFunc(0, result)
-    BuildGlobal(..) -> LabelInitializer(0, result)
+    BuildFunction(..) -> Label(LabelFunction, 0, result, False)
+    BuildGlobal(..) -> Label(LabelInitializer, 0, result, False)
   }
   case list.length(params) == list.length(param_names) {
     False -> Error("param_names must have same lenght as params")
@@ -899,7 +908,7 @@ pub fn add_instruction(
           list.length(fb.value_stack) - top_label.stack_limit,
         )
         |> list.fold(over: top_label.result, from: _, with: list.prepend)
-      Ok(CodeBuilder(..fb, value_stack:))
+      unreachable(CodeBuilder(..fb, value_stack:))
     }
     Nop -> Ok(fb)
     Block(block_type) | Loop(block_type) | If(block_type) -> {
@@ -907,19 +916,20 @@ pub fn add_instruction(
         BlockEmpty -> []
         BlockValue(v) -> [v]
       }
-      use #(fb, label_maker) <- result.map(case instr {
+      use #(fb, label_kind) <- result.map(case instr {
         Block(_) -> Ok(#(fb, LabelBlock))
         Loop(_) -> Ok(#(fb, LabelLoop))
         _ -> pop_push(fb, [I32], []) |> result.map(fn(fb) { #(fb, LabelIf) })
       })
       CodeBuilder(..fb, label_stack: [
-        label_maker(list.length(fb.value_stack), result),
+        Label(label_kind, list.length(fb.value_stack), result, False),
         ..fb.label_stack
       ])
     }
     Else -> {
       use new_label <- result.try(case top_label {
-        LabelIf(stack_limit:, result:) -> Ok(LabelElse(stack_limit:, result:))
+        Label(kind: LabelIf, ..) ->
+          Ok(Label(..top_label, kind: LabelElse, unreachable: False))
         _ -> Error("Else must follow If")
       })
       check_stack_top_exact(fb, top_label.result)
@@ -937,6 +947,7 @@ pub fn add_instruction(
         |> result.replace_error("Too few labels on the stack"),
       )
       pop_push(fb, break_to.result, [])
+      |> result.try(unreachable)
     }
     BreakIf(label_index) -> {
       use break_to <- result.try(
@@ -1020,8 +1031,9 @@ pub fn add_instruction(
     }
     End -> {
       case top_label {
-        LabelIf(result: [], ..) -> Ok(fb)
-        LabelIf(..) -> Error("Implicit else does not produce a result")
+        Label(kind: LabelIf, result: [], ..) -> Ok(fb)
+        Label(kind: LabelIf, ..) ->
+          Error("Implicit else does not produce a result")
         _ -> Ok(fb)
       }
       |> result.try(check_stack_top_exact(_, top_label.result))
@@ -1268,6 +1280,14 @@ pub fn add_instruction(
   |> result.map(fn(fb) { CodeBuilder(..fb, code: [instr, ..fb.code]) })
 }
 
+fn unreachable(fb: CodeBuilder) -> Result(CodeBuilder, String) {
+  case fb.label_stack {
+    [top, ..rest] -> Ok([Label(..top, unreachable: True), ..rest])
+    [] -> Error("Label stack is empty")
+  }
+  |> result.map(fn(label_stack) { CodeBuilder(..fb, label_stack:) })
+}
+
 fn get_local(fb: CodeBuilder, local_index: Int) -> Result(ValueType, String) {
   let n_params = list.length(fb.params)
   // params are considered locals too
@@ -1290,12 +1310,15 @@ fn get_local(fb: CodeBuilder, local_index: Int) -> Result(ValueType, String) {
 
 fn pop_push(fb: CodeBuilder, pop, push) {
   check_stack_top(fb, pop)
-  |> result.map(fn(fb) {
+  |> result.try(fn(fb) {
+    // if we are in unreachable code, we can pop virtual frames beyond the
+    // available stack, but they don't come off the actual stack
+    use cnt <- result.map(available_stack_count(fb))
     CodeBuilder(
       ..fb,
       value_stack: list.append(
         push,
-        list.drop(fb.value_stack, list.length(pop)),
+        list.drop(fb.value_stack, int.min(list.length(pop), cnt)),
       ),
     )
   })
@@ -1328,8 +1351,8 @@ fn check_stack_top_loop(
   expected: List(ValueType),
   depth: Int,
 ) -> Result(Nil, String) {
-  case expected, stack {
-    [exp, ..exp_rest], [act, ..act_rest] -> {
+  case top_label(fb), expected, stack {
+    Ok(_), [exp, ..exp_rest], [act, ..act_rest] -> {
       case value_type_subtype_of(fb, is: act, of: exp) {
         True -> check_stack_top_loop(fb, act_rest, exp_rest, depth + 1)
         False ->
@@ -1343,8 +1366,10 @@ fn check_stack_top_loop(
           )
       }
     }
-    [_exp, ..], [] -> Error("Too few values on the stack")
-    [], _ -> Ok(Nil)
+    Ok(Label(unreachable: True, ..)), _, _ -> Ok(Nil)
+    Ok(_), [], _ -> Ok(Nil)
+    Ok(_), [_exp, ..], [] -> Error("Too few values on the stack")
+    Error(msg), _, _ -> Error(msg)
   }
 }
 
@@ -1457,8 +1482,13 @@ fn top_label(fb: CodeBuilder) -> Result(Label, String) {
 }
 
 fn available_stack(fb: CodeBuilder) -> Result(List(ValueType), String) {
+  available_stack_count(fb)
+  |> result.map(list.take(fb.value_stack, _))
+}
+
+fn available_stack_count(fb: CodeBuilder) -> Result(Int, String) {
   use top_label <- result.map(top_label(fb))
-  list.take(fb.value_stack, list.length(fb.value_stack) - top_label.stack_limit)
+  list.length(fb.value_stack) - top_label.stack_limit
 }
 
 fn unpack_struct_fields(
