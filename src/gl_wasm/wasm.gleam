@@ -274,7 +274,7 @@ type Label {
 
 type LabelKind {
   LabelInitializer
-  LabelFunction
+  LabelFunc
   LabelBlock
   LabelLoop
   LabelIf
@@ -810,7 +810,7 @@ fn create_code_builder(
   result,
 ) -> Result(CodeBuilder, String) {
   let top_label = case builds {
-    BuildFunction(..) -> Label(LabelFunction, 0, result, False)
+    BuildFunction(..) -> Label(LabelFunc, 0, result, False)
     BuildGlobal(..) -> Label(LabelInitializer, 0, result, False)
   }
   case list.length(params) == list.length(param_names) {
