@@ -966,28 +966,19 @@ pub fn add_instruction(
       })
     }
     Break(label_index) | Branch(label_index) -> {
-      use branch_to <- result.try(
-        list_index(fb.label_stack, label_index)
-        |> result.replace_error("Too few labels on the stack"),
-      )
+      use branch_to <- result.try(label_by_index(fb, label_index))
       use #(fb, _popped) <- result.try(pop_many(fb, branch_to.result))
       unreachable(fb)
     }
     BreakIf(label_index) | BranchIf(label_index) -> {
-      use branch_to <- result.try(
-        list_index(fb.label_stack, label_index)
-        |> result.replace_error("Too few labels on the stack"),
-      )
+      use branch_to <- result.try(label_by_index(fb, label_index))
       // TODO: support loop params
       use #(fb, _popped) <- result.try(pop_one(fb, Known(I32)))
       use #(fb, _popped) <- result.map(pop_many(fb, branch_to.result))
       push_many(fb, branch_to.result)
     }
     BreakOnNull(label_index) | BranchOnNull(label_index) -> {
-      use branch_to <- result.try(
-        list_index(fb.label_stack, label_index)
-        |> result.replace_error("Too few labels on the stack"),
-      )
+      use branch_to <- result.try(label_by_index(fb, label_index))
       use #(fb, popped) <- result.try(pop_one(fb, Unknown))
       use vt <- result.try(case popped {
         Known(Ref(Nullable(ht))) -> Ok(Known(Ref(NonNull(ht))))
@@ -1003,10 +994,7 @@ pub fn add_instruction(
       push_one(fb, vt)
     }
     BreakOnNonNull(label_index) | BranchOnNonNull(label_index) -> {
-      use branch_to <- result.try(
-        list_index(fb.label_stack, label_index)
-        |> result.replace_error("Too few labels on the stack"),
-      )
+      use branch_to <- result.try(label_by_index(fb, label_index))
       use #(fb, popped) <- result.try(pop_one(fb, Unknown))
       use fb <- result.try(case popped {
         Known(Ref(Nullable(ht))) -> Ok(push_one(fb, Known(Ref(NonNull(ht)))))
@@ -1073,14 +1061,15 @@ pub fn add_instruction(
       fb
     }
     Select([]) -> {
-      // TODO: use #(fb, popped) <- result.try(pop_many(fb, [Known(I32), Unknown, Unknown]))
-      case available_stack(fb) {
-        Ok([Known(I32), Known(a), Known(b), ..])
+      use #(fb, popped) <- result.try(
+        pop_many(fb, [Known(I32), Unknown, Unknown]),
+      )
+      case popped {
+        [Known(a), Known(b), Known(I32)]
           if a == b
           && { a == I32 || a == I64 || a == F32 || a == F64 || a == V128 }
         -> pop_push_known(fb, [I32, a, a], [a])
-        Ok(_) -> Error("Expected [t t i32] on the stack")
-        Error(msg) -> Error(msg)
+        _ -> Error("Expected [t t i32] on the stack")
       }
     }
     Select([value_type]) ->
@@ -1162,63 +1151,58 @@ pub fn add_instruction(
         StructGetU(_, _) -> True
         _ -> False
       }
-      get_type(fb, type_index)
-      |> result.try(fn(t) {
-        case t {
-          Struct(field_types:, ..) ->
-            list_index(field_types, field_index)
-            |> result.replace_error(
-              "Struct type $"
-              <> int.to_string(type_index)
-              <> " does not have field index "
-              <> int.to_string(field_index),
-            )
-            |> result.try(fn(field) {
-              case packed, field {
-                False, PackedType(..) ->
-                  Error("struct.get not applicable to packed fields")
-                False, ValueType(value_type:, ..) -> Ok(value_type)
-                True, PackedType(..) -> Ok(I32)
-                True, ValueType(..) ->
-                  Error("struct.get_[s|u] not applicable to value types")
-              }
-            })
-          _ ->
-            Error("Type $" <> int.to_string(type_index) <> " is not a struct")
-        }
-      })
+      use t <- result.try(get_type(fb, type_index))
+      case t {
+        Struct(field_types:, ..) ->
+          list_index(field_types, field_index)
+          |> result.replace_error(
+            "Struct type $"
+            <> int.to_string(type_index)
+            <> " does not have field index "
+            <> int.to_string(field_index),
+          )
+          |> result.try(fn(field) {
+            case packed, field {
+              False, PackedType(..) ->
+                Error("struct.get not applicable to packed fields")
+              False, ValueType(value_type:, ..) -> Ok(value_type)
+              True, PackedType(..) -> Ok(I32)
+              True, ValueType(..) ->
+                Error("struct.get_[s|u] not applicable to value types")
+            }
+          })
+        _ -> Error("Type $" <> int.to_string(type_index) <> " is not a struct")
+      }
       |> result.try(fn(t) {
         pop_push_known(fb, [Ref(Nullable(ConcreteType(type_index)))], [t])
       })
     }
-    StructSet(type_index, field_index) ->
-      get_type(fb, type_index)
-      |> result.try(fn(t) {
-        case t {
-          Struct(field_types:, ..) ->
-            list_index(field_types, field_index)
-            |> result.replace_error(
-              "Struct type $"
-              <> int.to_string(type_index)
-              <> " does not have field index "
-              <> int.to_string(field_index),
-            )
-            |> result.try(fn(field) {
-              case field {
-                PackedType(mutable: Immutable, ..)
-                | ValueType(mutable: Immutable, ..) ->
-                  Error("struct.set on immutable field")
-                PackedType(mutable: Mutable, ..) -> Ok(I32)
-                ValueType(mutable: Mutable, value_type:, ..) -> Ok(value_type)
-              }
-            })
-          _ ->
-            Error("Type $" <> int.to_string(type_index) <> " is not a struct")
-        }
-      })
+    StructSet(type_index, field_index) -> {
+      use t <- result.try(get_type(fb, type_index))
+      case t {
+        Struct(field_types:, ..) ->
+          list_index(field_types, field_index)
+          |> result.replace_error(
+            "Struct type $"
+            <> int.to_string(type_index)
+            <> " does not have field index "
+            <> int.to_string(field_index),
+          )
+          |> result.try(fn(field) {
+            case field {
+              PackedType(mutable: Immutable, ..)
+              | ValueType(mutable: Immutable, ..) ->
+                Error("struct.set on immutable field")
+              PackedType(mutable: Mutable, ..) -> Ok(I32)
+              ValueType(mutable: Mutable, value_type:, ..) -> Ok(value_type)
+            }
+          })
+        _ -> Error("Type $" <> int.to_string(type_index) <> " is not a struct")
+      }
       |> result.try(fn(t) {
         pop_push_known(fb, [t, Ref(Nullable(ConcreteType(type_index)))], [])
       })
+    }
     LocalGet(local_index) ->
       get_local(fb, local_index)
       |> result.try(fn(t) { pop_push_known(fb, [], [t]) })
@@ -1312,6 +1296,11 @@ pub fn add_instruction(
       pop_push_known(fb, [F64, F64], [F64])
   }
   |> result.map(fn(fb) { CodeBuilder(..fb, code: [instr, ..fb.code]) })
+}
+
+fn label_by_index(fb: CodeBuilder, label_index: Int) -> Result(Label, String) {
+  list_index(fb.label_stack, label_index)
+  |> result.replace_error("Too few labels on the stack")
 }
 
 fn unreachable(fb: CodeBuilder) -> Result(CodeBuilder, String) {
@@ -1534,16 +1523,6 @@ fn top_label(fb: CodeBuilder) -> Result(Label, String) {
 fn bottom_label(fb: CodeBuilder) -> Result(Label, String) {
   list.last(fb.label_stack)
   |> result.replace_error("Label stack is empty")
-}
-
-fn available_stack(fb: CodeBuilder) -> Result(List(StackValueType), String) {
-  available_stack_count(fb)
-  |> result.map(list.take(fb.value_stack, _))
-}
-
-fn available_stack_count(fb: CodeBuilder) -> Result(Int, String) {
-  use top_label <- result.map(top_label(fb))
-  list.length(fb.value_stack) - top_label.stack_limit
 }
 
 fn unpack_struct_fields(
