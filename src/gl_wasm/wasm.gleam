@@ -1083,13 +1083,12 @@ pub fn add_instruction(
       |> result.try(pop_label)
       |> result.map(push_many(_, top_label.result))
     }
-    Drop ->
-      case list.length(fb.value_stack) < top_label.stack_limit + 1 {
-        True -> Error("Too few values on the stack")
-        False ->
-          Ok(CodeBuilder(..fb, value_stack: list.drop(fb.value_stack, 1)))
-      }
+    Drop -> {
+      use #(fb, _popped) <- result.map(pop_one(fb, Unknown))
+      fb
+    }
     Select([]) -> {
+      // TODO: use #(fb, popped) <- result.try(pop_many(fb, [Known(I32), Unknown, Unknown]))
       case available_stack(fb) {
         Ok([Known(I32), Known(a), Known(b), ..])
           if a == b

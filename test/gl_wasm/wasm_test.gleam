@@ -322,13 +322,34 @@ pub fn block_with_unreachable_test() {
   |> should.be_ok
 }
 
+pub fn block_with_unreachable_2_test() {
+  let code = [
+    wasm.Block(wasm.BlockValue(wasm.I64)),
+    wasm.LocalGet(0),
+    wasm.I64EqZ,
+    wasm.If(wasm.BlockValue(wasm.I64)),
+    i64_const(42),
+    wasm.Branch(1),
+    wasm.Else,
+    i64_const(42),
+    wasm.Branch(1),
+    wasm.End,
+    wasm.Unreachable,
+    wasm.End,
+    wasm.End,
+  ]
+  simple_func([wasm.I64], [wasm.I64], code)
+  |> result.try(simple_finalize)
+  |> should.be_ok
+}
+
 pub fn instr_after_unreachable_test() {
   let code = [
     wasm.Block(wasm.BlockEmpty),
     wasm.Unreachable,
     wasm.I32Add,
     wasm.Drop,
-    // TODO: wasm.Drop,
+    wasm.Drop,
     wasm.End,
     wasm.End,
   ]
