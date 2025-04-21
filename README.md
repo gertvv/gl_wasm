@@ -7,7 +7,8 @@ Create binary WebAssembly modules in Gleam.
 
 ## Goals
 
- - Support for the WebAssembly 2.0 (draft) specification, giving priority to
+ - Support for the [WebAssembly 3.0 (draft)
+ specification](https://wasm-dsl.github.io/spectec/core/), giving priority to
  features that are useful for functional languages, such as GC and return call.
  - Make it as difficult as is reasonably possible to generate invalid
  WebAssembly.
