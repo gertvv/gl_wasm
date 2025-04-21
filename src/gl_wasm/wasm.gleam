@@ -928,16 +928,7 @@ pub fn add_instruction(
     }
   })
   case instr {
-    Unreachable -> {
-      // unreachable clears the frame stack and produces the desired results
-      let value_stack =
-        list.drop(
-          fb.value_stack,
-          list.length(fb.value_stack) - top_label.stack_limit,
-        )
-        |> list.fold(over: top_label.result, from: _, with: list.prepend)
-      unreachable(CodeBuilder(..fb, value_stack:))
-    }
+    Unreachable -> unreachable(fb)
     Nop -> Ok(fb)
     Block(block_type) | Loop(block_type) | If(block_type) -> {
       let result = case block_type {
@@ -975,75 +966,65 @@ pub fn add_instruction(
       })
     }
     Break(label_index) | Branch(label_index) -> {
-      use break_to <- result.try(
+      use branch_to <- result.try(
         list_index(fb.label_stack, label_index)
         |> result.replace_error("Too few labels on the stack"),
       )
-      use #(fb, _popped) <- result.try(pop_many(fb, break_to.result))
+      use #(fb, _popped) <- result.try(pop_many(fb, branch_to.result))
       unreachable(fb)
     }
     BreakIf(label_index) | BranchIf(label_index) -> {
-      use break_to <- result.try(
+      use branch_to <- result.try(
         list_index(fb.label_stack, label_index)
         |> result.replace_error("Too few labels on the stack"),
       )
       // TODO: support loop params
       use #(fb, _popped) <- result.try(pop_one(fb, Known(I32)))
-      use #(fb, _popped) <- result.map(pop_many(fb, break_to.result))
-      push_many(fb, break_to.result)
+      use #(fb, _popped) <- result.map(pop_many(fb, branch_to.result))
+      push_many(fb, branch_to.result)
     }
     BreakOnNull(label_index) | BranchOnNull(label_index) -> {
-      use break_to <- result.try(
+      use branch_to <- result.try(
         list_index(fb.label_stack, label_index)
         |> result.replace_error("Too few labels on the stack"),
       )
-      use #(fb, vt) <- result.try(
-        // TODO: rewrite using pop_one
-        stack_top(fb)
-        |> result.try(fn(t) {
-          case t {
-            Known(Ref(Nullable(ht))) ->
-              pop_push(fb, [t], [])
-              |> result.map(fn(fb) { #(fb, Ref(NonNull(ht))) })
-            Known(t) ->
-              Error(
-                "Expected (ref null *) at depth 0 but got "
-                <> value_type_to_string(t),
-              )
-            Unknown -> todo
-          }
-        }),
-      )
-      use #(fb, _popped) <- result.map(pop_many(fb, break_to.result))
-      let fb = push_many(fb, break_to.result)
-      push_one(fb, Known(vt))
+      use #(fb, popped) <- result.try(pop_one(fb, Unknown))
+      use vt <- result.try(case popped {
+        Known(Ref(Nullable(ht))) -> Ok(Known(Ref(NonNull(ht))))
+        Known(t) ->
+          Error(
+            "Expected (ref null *) at depth 0 but got "
+            <> value_type_to_string(t),
+          )
+        Unknown -> Ok(Unknown)
+      })
+      use #(fb, _popped) <- result.map(pop_many(fb, branch_to.result))
+      let fb = push_many(fb, branch_to.result)
+      push_one(fb, vt)
     }
     BreakOnNonNull(label_index) | BranchOnNonNull(label_index) -> {
-      use break_to <- result.try(
+      use branch_to <- result.try(
         list_index(fb.label_stack, label_index)
         |> result.replace_error("Too few labels on the stack"),
       )
-      // TODO: rewrite using pop_one
-      use fb <- result.try(
-        stack_top(fb)
-        |> result.try(fn(t) {
-          case t {
-            Known(Ref(Nullable(ht))) ->
-              pop_push(fb, [t], [Known(Ref(NonNull(ht)))])
-            Known(t) ->
-              Error(
-                "Expected (ref null *) at depth 0 but got "
-                <> value_type_to_string(t),
-              )
-            Unknown -> todo
-          }
-        }),
-      )
-      use #(fb, _popped) <- result.map(pop_many(fb, break_to.result))
-      let fb = push_many(fb, break_to.result)
-      push_one(fb, Known(Ref(NonNull(AbstractAny))))
+      use #(fb, popped) <- result.try(pop_one(fb, Unknown))
+      use fb <- result.try(case popped {
+        Known(Ref(Nullable(ht))) -> Ok(push_one(fb, Known(Ref(NonNull(ht)))))
+        Known(t) ->
+          Error(
+            "Expected (ref null *) at depth 0 but got "
+            <> value_type_to_string(t),
+          )
+        Unknown -> Ok(push_one(fb, Unknown))
+      })
+      use #(fb, _popped) <- result.map(pop_many(fb, branch_to.result))
+      push_many(fb, branch_to.result)
     }
-    Return -> pop_push_known(fb, fb.result, [])
+    Return -> {
+      use branch_to <- result.try(bottom_label(fb))
+      use #(fb, _popped) <- result.try(pop_many(fb, branch_to.result))
+      unreachable(fb)
+    }
     Call(index) | CallRef(index) | ReturnCall(index) | ReturnCallRef(index) -> {
       let #(is_return, is_ref) = case instr {
         Call(_) -> #(False, False)
@@ -1068,7 +1049,11 @@ pub fn add_instruction(
       })
       |> result.try(fn(fb) {
         case is_return {
-          True -> pop_push_known(fb, fb.result, [])
+          True -> {
+            use branch_to <- result.try(bottom_label(fb))
+            use #(fb, _popped) <- result.try(pop_many(fb, branch_to.result))
+            unreachable(fb)
+          }
           False -> Ok(fb)
         }
       })
@@ -1108,19 +1093,16 @@ pub fn add_instruction(
       |> result.try(fn(ht) { pop_push_known(fb, [], [Ref(NonNull(ht))]) })
     RefIsNull -> pop_push_known(fb, [Ref(Nullable(AbstractAny))], [I32])
     RefAsNonNull -> {
-      stack_top(fb)
-      |> result.try(fn(t) {
-        case t {
-          Known(Ref(Nullable(ht))) ->
-            pop_push(fb, [t], [Known(Ref(NonNull(ht)))])
-          Known(t) ->
-            Error(
-              "Expected (ref null *) at depth 0 but got "
-              <> value_type_to_string(t),
-            )
-          Unknown -> todo
-        }
-      })
+      use #(fb, popped) <- result.try(pop_one(fb, Unknown))
+      case popped {
+        Known(Ref(Nullable(ht))) -> Ok(push_one(fb, Known(Ref(NonNull(ht)))))
+        Known(t) ->
+          Error(
+            "Expected (ref null *) at depth 0 but got "
+            <> value_type_to_string(t),
+          )
+        Unknown -> Ok(push_one(fb, Unknown))
+      }
     }
     RefEq ->
       pop_push_known(
@@ -1130,26 +1112,24 @@ pub fn add_instruction(
       )
     RefTest(ref_type) | RefCast(ref_type) -> {
       let result = case instr {
-        RefTest(_) -> [I32]
-        _ -> [Ref(ref_type)]
+        RefTest(_) -> Known(I32)
+        _ -> Known(Ref(ref_type))
       }
-      stack_top(fb)
-      |> result.try(fn(t) {
-        case t {
-          Known(t) ->
-            case value_type_subtype_of(fb, is: Ref(ref_type), of: t) {
-              True -> pop_push_known(fb, [t], result)
-              False ->
-                Error(
-                  "Expected a supertype of "
-                  <> value_type_to_string(Ref(ref_type))
-                  <> " at depth 0 but got "
-                  <> value_type_to_string(t),
-                )
-            }
-          Unknown -> todo
-        }
-      })
+      use #(fb, popped) <- result.try(pop_one(fb, Unknown))
+      case popped {
+        Known(t) ->
+          case value_type_subtype_of(fb, is: Ref(ref_type), of: t) {
+            True -> Ok(push_one(fb, result))
+            False ->
+              Error(
+                "Expected a supertype of "
+                <> value_type_to_string(Ref(ref_type))
+                <> " at depth 0 but got "
+                <> value_type_to_string(t),
+              )
+          }
+        Unknown -> Ok(push_one(fb, result))
+      }
     }
     StructNew(type_index) -> {
       get_type(fb, type_index)
@@ -1336,10 +1316,20 @@ pub fn add_instruction(
 
 fn unreachable(fb: CodeBuilder) -> Result(CodeBuilder, String) {
   case fb.label_stack {
-    [top, ..rest] -> Ok([Label(..top, unreachable: True), ..rest])
+    [top, ..rest] -> {
+      Ok(
+        CodeBuilder(
+          ..fb,
+          label_stack: [Label(..top, unreachable: True), ..rest],
+          value_stack: list.drop(
+            fb.value_stack,
+            list.length(fb.value_stack) - top.stack_limit,
+          ),
+        ),
+      )
+    }
     [] -> Error("Label stack is empty")
   }
-  |> result.map(fn(label_stack) { CodeBuilder(..fb, label_stack:) })
 }
 
 fn get_local(fb: CodeBuilder, local_index: Int) -> Result(ValueType, String) {
@@ -1534,19 +1524,16 @@ fn is_func(t: CompositeType) -> Bool {
   }
 }
 
-fn stack_top(fb: CodeBuilder) -> Result(StackValueType, String) {
-  use stack <- result.try(available_stack(fb))
-  case stack {
-    [] -> Error("Too few values on the stack")
-    [t, ..] -> Ok(t)
-  }
-}
-
 fn top_label(fb: CodeBuilder) -> Result(Label, String) {
   case fb.label_stack {
     [top_label, ..] -> Ok(top_label)
     [] -> Error("Label stack is empty")
   }
+}
+
+fn bottom_label(fb: CodeBuilder) -> Result(Label, String) {
+  list.last(fb.label_stack)
+  |> result.replace_error("Label stack is empty")
 }
 
 fn available_stack(fb: CodeBuilder) -> Result(List(StackValueType), String) {
