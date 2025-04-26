@@ -38,7 +38,7 @@ Create binary WebAssembly modules in Gleam.
  - [ ] Type recursion and subtyping
  - [x] Global initialization
  - [x] Validation for global initialization
- - [ ] Advanced validation for break/return
+ - [x] Advanced validation for break/return
  - [ ] [Function-typed blocks](https://webassembly.github.io/spec/core/syntax/instructions.html#control-instructions)
  - [ ] Features related to unimplemented sections
  - [x] Use bytes_tree instead of byte_array.concat & friends

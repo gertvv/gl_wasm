@@ -1376,10 +1376,8 @@ fn pop_one(
 fn pop_many(fb, expected) {
   list.try_fold(expected, #(fb, []), fn(acc, expected) {
     let #(fb, popped) = acc
-    case pop_one(fb, expected) {
-      Ok(#(fb, actual)) -> Ok(#(fb, [actual, ..popped]))
-      Error(msg) -> Error(msg)
-    }
+    use #(fb, actual) <- result.map(pop_one(fb, expected))
+    #(fb, [actual, ..popped])
   })
 }
 
@@ -1400,11 +1398,8 @@ fn pop_push(
   to_pop: List(StackValueType),
   to_push: List(StackValueType),
 ) {
-  pop_many(fb, to_pop)
-  |> result.map(fn(res) {
-    let #(fb, _popped) = res
-    push_many(fb, to_push)
-  })
+  use #(fb, _popped) <- result.map(pop_many(fb, to_pop))
+  push_many(fb, to_push)
 }
 
 fn pop_label(fb: CodeBuilder) -> Result(CodeBuilder, String) {
