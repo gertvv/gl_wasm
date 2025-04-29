@@ -404,6 +404,69 @@ pub fn add_global_non_const_expr_test() {
   ))
 }
 
+pub fn add_and_init_memory_test() {
+  let assert Ok(zero) = wasm.int32_unsigned(0)
+  let assert Ok(four) = wasm.int32_unsigned(4)
+  let mb = wasm.create_module_builder(None)
+  let assert Ok(mb) = wasm.add_memory(mb, 1, Some(64))
+  let assert Ok(mb) = wasm.add_passive_data(mb, <<0x00, 0x01, 0x02, 0x03>>)
+  let assert Ok(#(mb, _)) = wasm.add_type(mb, wasm.Func(None, [], []))
+  let assert Ok(#(mb, fb)) =
+    wasm.create_function_builder(mb, wasm.FunctionSignature(0, None, None))
+  list.try_fold(
+    [
+      wasm.I32Const(zero),
+      wasm.I32Const(zero),
+      wasm.I32Const(four),
+      wasm.MemoryInit(0),
+      wasm.End,
+    ],
+    fb,
+    wasm.add_instruction,
+  )
+  |> result.try(wasm.finalize_function(mb, _))
+  |> should.be_ok
+}
+
+pub fn can_only_create_one_memory_test() {
+  let mb = wasm.create_module_builder(None)
+  let assert Ok(mb) = wasm.add_memory(mb, 1, Some(64))
+
+  wasm.add_memory(mb, 1, None)
+  |> should.equal(Error("A memory is already defined"))
+
+  wasm.import_memory(mb, 1, None, wasm.ImportSource("host", "mem"))
+  |> should.equal(Error("A memory is already defined"))
+
+  let mb = wasm.create_module_builder(None)
+  let assert Ok(mb) =
+    wasm.import_memory(mb, 1, None, wasm.ImportSource("host", "mem"))
+
+  wasm.add_memory(mb, 1, None)
+  |> should.equal(Error("A memory is already defined"))
+}
+
+pub fn can_not_reference_undefined_data_test() {
+  let assert Ok(zero) = wasm.int32_unsigned(0)
+  let assert Ok(four) = wasm.int32_unsigned(4)
+  let mb = wasm.create_module_builder(None)
+  let assert Ok(mb) = wasm.add_memory(mb, 1, Some(64))
+  let assert Ok(#(mb, _)) = wasm.add_type(mb, wasm.Func(None, [], []))
+  let assert Ok(#(_, fb)) =
+    wasm.create_function_builder(mb, wasm.FunctionSignature(0, None, None))
+  list.try_fold(
+    [
+      wasm.I32Const(zero),
+      wasm.I32Const(zero),
+      wasm.I32Const(four),
+      wasm.MemoryInit(0),
+    ],
+    fb,
+    wasm.add_instruction,
+  )
+  |> should.equal(Error("Data index 0 does not exist"))
+}
+
 pub fn return_null_struct_ref_test() {
   let mb = wasm.create_module_builder(None)
   let assert Ok(#(mb, _)) =
@@ -997,6 +1060,72 @@ pub fn emit_reftypes_and_global_import_test() {
       0x20, 0x01, 0x0f, 0x05, 0x20, 0x00, 0xfb, 0x02, 0x00, 0x01, 0xd4, 0x20,
       0x01, 0x20, 0x00, 0xfb, 0x02, 0x00, 0x00, 0x20, 0x02, 0x14, 0x01, 0x20,
       0x02, 0x12, 0x00, 0x0b, 0x00, 0x0b,
+    >>),
+  )
+}
+
+pub fn emit_data_and_memory_test() {
+  let do_it = fn() {
+    let assert Ok(zero) = wasm.int32_unsigned(0)
+    let assert Ok(twelve) = wasm.int32_unsigned(12)
+    let mb = wasm.create_module_builder(None)
+    use #(mb, type_index_greeter) <- result.try(wasm.add_type(
+      mb,
+      wasm.Func(None, [wasm.I32], [wasm.I32]),
+    ))
+    use #(mb, gb) <- result.try(wasm.create_global_builder(
+      mb,
+      None,
+      wasm.Immutable,
+      wasm.I32,
+    ))
+    use gb <- result.try(wasm.add_instruction(gb, wasm.I32Const(twelve)))
+    use gb <- result.try(wasm.add_instruction(gb, wasm.End))
+    use mb <- result.try(wasm.finalize_global(mb, gb))
+    use mb <- result.try(wasm.add_memory(mb, 1, None))
+    use mb <- result.try(wasm.add_passive_data(mb, <<"Hello, WASM!":utf8>>))
+    use #(mb, fb) <- result.try(wasm.create_function_builder(
+      mb,
+      wasm.FunctionSignature(type_index_greeter, None, None),
+    ))
+    use fb <- result.try(list.try_fold(
+      over: [
+        // target memory address
+        wasm.LocalGet(0),
+        // source data address
+        wasm.I32Const(zero),
+        // number of bytes
+        wasm.GlobalGet(0),
+        // get bytes from data segment 0
+        wasm.MemoryInit(0),
+        // return length
+        wasm.GlobalGet(0),
+        // terminate the function
+        wasm.End,
+      ],
+      from: fb,
+      with: wasm.add_instruction,
+    ))
+    use mb <- result.try(wasm.finalize_function(mb, fb))
+    // Export the "greet" function
+    use mb <- result.try(wasm.add_export(mb, wasm.ExportFunction("greet", 0)))
+    // Export the memory
+    wasm.add_export(mb, wasm.ExportMemory("memory", 0))
+  }
+  do_it()
+  |> result.map_error(wasm.ValidationError)
+  |> result.try(wasm.emit_module(_, memory_output_stream()))
+  |> result.map(bytes_tree.to_bit_array)
+  |> should.equal(
+    Ok(<<
+      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60,
+      0x01, 0x7f, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00,
+      0x01, 0x06, 0x06, 0x01, 0x7f, 0x00, 0x41, 0x0c, 0x0b, 0x07, 0x12, 0x02,
+      0x05, 0x67, 0x72, 0x65, 0x65, 0x74, 0x00, 0x00, 0x06, 0x6d, 0x65, 0x6d,
+      0x6f, 0x72, 0x79, 0x02, 0x00, 0x0c, 0x01, 0x01, 0x0a, 0x10, 0x01, 0x0e,
+      0x00, 0x20, 0x00, 0x41, 0x00, 0x23, 0x00, 0xfc, 0x08, 0x00, 0x00, 0x23,
+      0x00, 0x0b, 0x0b, 0x0f, 0x01, 0x01, 0x0c, 0x48, 0x65, 0x6c, 0x6c, 0x6f,
+      0x2c, 0x20, 0x57, 0x41, 0x53, 0x4d, 0x21,
     >>),
   )
 }

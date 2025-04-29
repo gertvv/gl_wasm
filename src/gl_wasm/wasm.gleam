@@ -3,6 +3,7 @@
 //// WebAssembly types and instructions are represented by Gleam types and
 //// validation is performed as the WebAssembly is generated.
 
+import gleam/bit_array
 import gleam/bool
 import gleam/bytes_tree.{type BytesTree, from_bit_array as bt}
 import gleam/int
@@ -99,11 +100,16 @@ pub opaque type ModuleBuilder {
     /// functions stored in reverse order
     functions: List(FunctionDefinition),
     next_function_index: Int,
+    /// memories stored in reverse order (max. 1 for now)
+    memories: List(MemoryDefinition),
     /// globals stored in reverse order
     globals: List(GlobalDefinition),
     next_global_index: Int,
     exports: List(Export),
     start_function_index: Option(Int),
+    /// data segments stored in reverse order
+    data: List(DataDefinition),
+    next_data_index: Int,
   )
 }
 
@@ -184,6 +190,21 @@ pub type GlobalDefinition {
   )
 }
 
+pub type MemoryDefinition {
+  MemoryImport(limits: Limits, from: ImportSource)
+  MemoryDeclaration(limits: Limits)
+}
+
+pub type DataDefinition {
+  PassiveData(init: BitArray)
+  // TODO: ActiveData(init: BitArray, memory_index: Int, offset: List(Instruction))
+  // -> requires a DataBuilder
+}
+
+pub type Limits {
+  Limits(min: Int, max: Option(Int))
+}
+
 /// Represents the source (module and name) of an import.
 pub type ImportSource {
   ImportSource(module: String, name: String)
@@ -197,10 +218,12 @@ type Import {
     mutable: Mutability,
     value_type: ValueType,
   )
+  ImportMemory(module: String, name: String, limits: Limits)
 }
 
 pub type Export {
   ExportFunction(name: String, function_index: Int)
+  ExportMemory(name: String, memory_index: Int)
   ExportGlobal(name: String, global_index: Int)
 }
 
@@ -350,7 +373,35 @@ pub type Instruction {
   // TODO: table instructions
   //
   // Memory instructions
-  // TODO: memory instructions
+  I32Load(offset: Int, align: Int)
+  I64Load(offset: Int, align: Int)
+  F32Load(offset: Int, align: Int)
+  F64Load(offset: Int, align: Int)
+  I32Load8S(offset: Int, align: Int)
+  I32Load8U(offset: Int, align: Int)
+  I32Load16S(offset: Int, align: Int)
+  I32Load16U(offset: Int, align: Int)
+  I64Load8S(offset: Int, align: Int)
+  I64Load8U(offset: Int, align: Int)
+  I64Load16S(offset: Int, align: Int)
+  I64Load16U(offset: Int, align: Int)
+  I64Load32S(offset: Int, align: Int)
+  I64Load32U(offset: Int, align: Int)
+  I32Store(offset: Int, align: Int)
+  I64Store(offset: Int, align: Int)
+  F32Store(offset: Int, align: Int)
+  F64Store(offset: Int, align: Int)
+  I32Store8(offset: Int, align: Int)
+  I32Store16(offset: Int, align: Int)
+  I64Store8(offset: Int, align: Int)
+  I64Store16(offset: Int, align: Int)
+  I64Store32(offset: Int, align: Int)
+  MemorySize
+  MemoryGrow
+  MemoryFill
+  MemoryCopy
+  MemoryInit(data_index: Int)
+  DataDrop(data_index: Int)
   //
   // Numeric instructions
   I32Const(value: Int32)
@@ -479,10 +530,13 @@ pub fn create_module_builder(name: Option(String)) -> ModuleBuilder {
     next_type_index: 0,
     functions: [],
     next_function_index: 0,
+    memories: [],
     globals: [],
     next_global_index: 0,
     exports: [],
     start_function_index: None,
+    data: [],
+    next_data_index: 0,
   )
 }
 
@@ -861,11 +915,12 @@ fn create_code_builder(
   }
 }
 
-fn get_global(
-  fb: CodeBuilder,
-  global_index: Int,
-) -> Result(GlobalDefinition, String) {
+fn get_global(fb: CodeBuilder, global_index) {
   get_global_by_index(fb.module_builder, global_index)
+}
+
+fn get_data(fb: CodeBuilder, data_index) {
+  get_data_by_index(fb.module_builder, data_index)
 }
 
 /// Mark something for export.
@@ -876,6 +931,8 @@ pub fn add_export(
   case export {
     ExportFunction(function_index:, ..) ->
       get_function_by_index(mb, function_index) |> result.replace(Nil)
+    ExportMemory(memory_index:, ..) ->
+      get_memory_by_index(mb, memory_index) |> result.replace(Nil)
     ExportGlobal(global_index:, ..) ->
       get_global_by_index(mb, global_index) |> result.replace(Nil)
   }
@@ -1224,6 +1281,85 @@ pub fn add_instruction(
         }
       })
       |> result.try(fn(t) { pop_push_known(fb, [t], []) })
+    I32Load(offset, align) ->
+      validate_memargs(fb, 32, offset, align)
+      |> result.try(pop_push_known(_, [I32], [I32]))
+    I64Load(offset, align) ->
+      validate_memargs(fb, 64, offset, align)
+      |> result.try(pop_push_known(_, [I32], [I64]))
+    F32Load(offset, align) ->
+      validate_memargs(fb, 32, offset, align)
+      |> result.try(pop_push_known(_, [I32], [F32]))
+    F64Load(offset, align) ->
+      validate_memargs(fb, 64, offset, align)
+      |> result.try(pop_push_known(_, [I32], [F64]))
+    I32Load8S(offset, align) ->
+      validate_memargs(fb, 8, offset, align)
+      |> result.try(pop_push_known(_, [I32], [I32]))
+    I32Load8U(offset, align) ->
+      validate_memargs(fb, 8, offset, align)
+      |> result.try(pop_push_known(_, [I32], [I32]))
+    I32Load16S(offset, align) ->
+      validate_memargs(fb, 16, offset, align)
+      |> result.try(pop_push_known(_, [I32], [I32]))
+    I32Load16U(offset, align) ->
+      validate_memargs(fb, 16, offset, align)
+      |> result.try(pop_push_known(_, [I32], [I32]))
+    I64Load8S(offset, align) ->
+      validate_memargs(fb, 8, offset, align)
+      |> result.try(pop_push_known(_, [I32], [I32]))
+    I64Load8U(offset, align) ->
+      validate_memargs(fb, 8, offset, align)
+      |> result.try(pop_push_known(_, [I32], [I32]))
+    I64Load16S(offset, align) ->
+      validate_memargs(fb, 16, offset, align)
+      |> result.try(pop_push_known(_, [I32], [I32]))
+    I64Load16U(offset, align) ->
+      validate_memargs(fb, 16, offset, align)
+      |> result.try(pop_push_known(_, [I32], [I32]))
+    I64Load32S(offset, align) ->
+      validate_memargs(fb, 32, offset, align)
+      |> result.try(pop_push_known(_, [I32], [I32]))
+    I64Load32U(offset, align) ->
+      validate_memargs(fb, 32, offset, align)
+      |> result.try(pop_push_known(_, [I32], [I32]))
+    I32Store(offset, align) ->
+      validate_memargs(fb, 32, offset, align)
+      |> result.try(pop_push_known(_, [I32, I32], []))
+    I64Store(offset, align) ->
+      validate_memargs(fb, 64, offset, align)
+      |> result.try(pop_push_known(_, [I32, I64], []))
+    F32Store(offset, align) ->
+      validate_memargs(fb, 32, offset, align)
+      |> result.try(pop_push_known(_, [I32, F32], []))
+    F64Store(offset, align) ->
+      validate_memargs(fb, 64, offset, align)
+      |> result.try(pop_push_known(_, [I32, F64], []))
+    I32Store8(offset, align) ->
+      validate_memargs(fb, 8, offset, align)
+      |> result.try(pop_push_known(_, [I32, I32], []))
+    I32Store16(offset, align) ->
+      validate_memargs(fb, 16, offset, align)
+      |> result.try(pop_push_known(_, [I32, I32], []))
+    I64Store8(offset, align) ->
+      validate_memargs(fb, 8, offset, align)
+      |> result.try(pop_push_known(_, [I32, I64], []))
+    I64Store16(offset, align) ->
+      validate_memargs(fb, 16, offset, align)
+      |> result.try(pop_push_known(_, [I32, I64], []))
+    I64Store32(offset, align) ->
+      validate_memargs(fb, 32, offset, align)
+      |> result.try(pop_push_known(_, [I32, I64], []))
+    MemorySize -> check_memory(fb) |> result.map(push_one(_, Known(I32)))
+    MemoryGrow ->
+      check_memory(fb) |> result.try(pop_push_known(_, [I32], [I32]))
+    MemoryFill | MemoryCopy ->
+      check_memory(fb) |> result.try(pop_push_known(_, [I32, I32, I32], []))
+    MemoryInit(data_index) ->
+      check_memory(fb)
+      |> result.try(get_data(_, data_index))
+      |> result.try(fn(_) { pop_push_known(fb, [I32, I32, I32], []) })
+    DataDrop(data_index) -> get_data(fb, data_index) |> result.replace(fb)
     I32Const(_) -> pop_push_known(fb, [], [I32])
     I64Const(_) -> pop_push_known(fb, [], [I64])
     F32Const(_) -> pop_push_known(fb, [], [F32])
@@ -1339,6 +1475,28 @@ fn get_local(fb: CodeBuilder, local_index: Int) -> Result(ValueType, String) {
   |> result.replace_error(
     "Local index " <> int.to_string(local_index) <> " does not exist",
   )
+}
+
+fn check_memory(fb: CodeBuilder) -> Result(CodeBuilder, String) {
+  get_memory_by_index(fb.module_builder, 0)
+  |> result.replace(fb)
+}
+
+fn validate_memargs(
+  fb: CodeBuilder,
+  bit_width: Int,
+  offset: Int,
+  align: Int,
+) -> Result(CodeBuilder, String) {
+  use fb <- result.try(check_memory(fb))
+  case
+    int.bitwise_shift_left(1, align) <= bit_width / 8,
+    offset <= int32_u_max
+  {
+    False, _ -> Error("2^{align} may not exceed {bit_width}/8")
+    _, False -> Error("offset may not exceed int32_u_max")
+    _, _ -> Ok(fb)
+  }
 }
 
 fn pop_one(
@@ -1672,6 +1830,20 @@ pub fn get_function_by_index(
   )
 }
 
+/// Get a memory definition by index.
+///
+/// Currently, at most one memory can exist.
+pub fn get_memory_by_index(
+  mb: ModuleBuilder,
+  memory_index: Int,
+) -> Result(MemoryDefinition, String) {
+  case mb.memories, memory_index {
+    [definition, ..], 0 -> Ok(definition)
+    _, _ ->
+      Error("Memory index " <> int.to_string(memory_index) <> " does not exist")
+  }
+}
+
 /// Get a global definition by index.
 pub fn get_global_by_index(
   mb: ModuleBuilder,
@@ -1680,6 +1852,17 @@ pub fn get_global_by_index(
   list_index(mb.globals, { mb.next_global_index - 1 } - global_index)
   |> result.replace_error(
     "Global index " <> int.to_string(global_index) <> " does not exist",
+  )
+}
+
+/// Get a data definition by index.
+pub fn get_data_by_index(
+  mb: ModuleBuilder,
+  data_index: Int,
+) -> Result(DataDefinition, String) {
+  list_index(mb.data, mb.next_data_index - data_index - 1)
+  |> result.replace_error(
+    "Data index " <> int.to_string(data_index) <> " does not exist",
   )
 }
 
@@ -1698,6 +1881,54 @@ pub fn set_start_function(
       _ -> Error("Start function must be [] -> []")
     }
   })
+}
+
+/// Add a memory with given limits (in units of page size).
+pub fn add_memory(
+  mb: ModuleBuilder,
+  min: Int,
+  max: Option(Int),
+) -> Result(ModuleBuilder, String) {
+  add_memory_do(mb, MemoryDeclaration(Limits(min, max)))
+}
+
+/// Import a memory with given limits (in units of page size) from the given source.
+pub fn import_memory(
+  mb: ModuleBuilder,
+  min: Int,
+  max: Option(Int),
+  from: ImportSource,
+) -> Result(ModuleBuilder, String) {
+  add_memory_do(mb, MemoryImport(Limits(min, max), from))
+}
+
+fn add_memory_do(
+  mb: ModuleBuilder,
+  def: MemoryDefinition,
+) -> Result(ModuleBuilder, String) {
+  case mb.memories, def.limits.min, def.limits.max {
+    [_, ..], _, _ -> Error("A memory is already defined")
+    _, n, _ | _, _, Some(n) if n > 65_536 ->
+      Error("Memory limits may not exceed 2^16")
+    _, _, _ -> Ok(ModuleBuilder(..mb, memories: [def]))
+  }
+}
+
+pub fn add_passive_data(
+  mb: ModuleBuilder,
+  init: BitArray,
+) -> Result(ModuleBuilder, String) {
+  case bit_array.bit_size(init) % 8 {
+    0 ->
+      Ok(
+        ModuleBuilder(
+          ..mb,
+          data: [PassiveData(init), ..mb.data],
+          next_data_index: mb.next_data_index + 1,
+        ),
+      )
+    _ -> Error("Data must be a whole number of bytes")
+  }
 }
 
 // --------------------------------------------------------------------------- 
@@ -1731,6 +1962,15 @@ pub fn emit_module(
         _ -> Error(Nil)
       }
     })
+  let memory_imports =
+    list.reverse(mb.memories)
+    |> list.filter_map(fn(memory) {
+      case memory {
+        MemoryImport(limits:, from:) ->
+          Ok(ImportMemory(from.module, from.name, limits:))
+        _ -> Error(Nil)
+      }
+    })
   let global_imports =
     list.reverse(mb.globals)
     |> list.filter_map(fn(global) {
@@ -1741,7 +1981,7 @@ pub fn emit_module(
       }
     })
   let imports =
-    list.flatten([func_imports, global_imports])
+    list.flatten([func_imports, memory_imports, global_imports])
     |> list.map(encode_import)
   use os <- result.try(emit_vector_section_conditional(
     os,
@@ -1768,7 +2008,20 @@ pub fn emit_module(
 
   // TODO: emit tables
 
-  //  TODO: emit memory
+  // emit memory declarations
+  let memories =
+    list.reverse(mb.memories)
+    |> list.filter_map(fn(memory) {
+      case memory {
+        MemoryDeclaration(limits:) -> Ok(encode_limits(limits))
+        _ -> Error(Nil)
+      }
+    })
+  use os <- result.try(emit_vector_section_conditional(
+    os,
+    section_memory,
+    memories,
+  ))
 
   // emit globals
   let globals =
@@ -1811,6 +2064,16 @@ pub fn emit_module(
 
   // TODO: emit elements
 
+  // emit data count section
+  use os <- result.try(case mb.next_data_index {
+    0 -> Ok(os)
+    n ->
+      write_bytes(
+        os,
+        encode_section(section_data_count, bt(leb128_encode_unsigned(n))),
+      )
+  })
+
   // emit function code
   let func_codes =
     list.reverse(mb.functions)
@@ -1827,6 +2090,12 @@ pub fn emit_module(
     section_code,
     func_codes,
   ))
+
+  // emit data section
+  let data =
+    list.reverse(mb.data)
+    |> list.map(encode_data)
+  use os <- result.try(emit_vector_section_conditional(os, section_data, data))
 
   // emit names
   let names_data = encode_names(mb)
@@ -2008,6 +2277,11 @@ fn encode_import(i: Import) -> BytesTree {
           prefix: code_transport_function,
           to: bt(leb128_encode_unsigned(type_index)),
         )
+      ImportMemory(limits:, ..) ->
+        bytes_tree.prepend(
+          prefix: code_transport_memory,
+          to: encode_limits(limits),
+        )
       ImportGlobal(mutable:, value_type:, ..) ->
         bytes_tree.append(
           to: encode_value_type(value_type),
@@ -2032,6 +2306,26 @@ fn encode_global(
   |> bytes_tree.concat
 }
 
+fn encode_limits(limits: Limits) -> BytesTree {
+  case limits.max {
+    None -> [<<0x00>>, leb128_encode_unsigned(limits.min)]
+    Some(max) -> [
+      <<0x01>>,
+      leb128_encode_unsigned(limits.min),
+      leb128_encode_unsigned(max),
+    ]
+  }
+  |> bytes_tree.concat_bit_arrays
+}
+
+fn encode_data(data_definition: DataDefinition) -> BytesTree {
+  case data_definition {
+    PassiveData(init) ->
+      [<<0x01>>, leb128_encode_unsigned(bit_array.byte_size(init)), init]
+      |> bytes_tree.concat_bit_arrays
+  }
+}
+
 fn encode_export(e: Export) -> BytesTree {
   [
     encode_name(e.name),
@@ -2040,6 +2334,11 @@ fn encode_export(e: Export) -> BytesTree {
         bytes_tree.prepend(
           prefix: code_transport_function,
           to: bt(leb128_encode_unsigned(function_index)),
+        )
+      ExportMemory(memory_index:, ..) ->
+        bytes_tree.prepend(
+          prefix: code_transport_memory,
+          to: bt(leb128_encode_unsigned(memory_index)),
         )
       ExportGlobal(_, global_index) ->
         bytes_tree.prepend(
@@ -2263,7 +2562,71 @@ fn encode_instruction(instr: Instruction) -> BytesTree {
     // TODO: table instructions
     //
     // Memory instructions
-    // TODO: memory instructions
+    I32Load(offset, align) ->
+      emit_load_store(code_instr_i32_load, offset, align)
+    I64Load(offset, align) ->
+      emit_load_store(code_instr_i64_load, offset, align)
+    F32Load(offset, align) ->
+      emit_load_store(code_instr_f32_load, offset, align)
+    F64Load(offset, align) ->
+      emit_load_store(code_instr_f64_load, offset, align)
+    I32Load8S(offset, align) ->
+      emit_load_store(code_instr_i32_load8_s, offset, align)
+    I32Load8U(offset, align) ->
+      emit_load_store(code_instr_i32_load8_u, offset, align)
+    I32Load16S(offset, align) ->
+      emit_load_store(code_instr_i32_load16_s, offset, align)
+    I32Load16U(offset, align) ->
+      emit_load_store(code_instr_i32_load16_u, offset, align)
+    I64Load8S(offset, align) ->
+      emit_load_store(code_instr_i64_load8_s, offset, align)
+    I64Load8U(offset, align) ->
+      emit_load_store(code_instr_i64_load8_u, offset, align)
+    I64Load16S(offset, align) ->
+      emit_load_store(code_instr_i64_load16_s, offset, align)
+    I64Load16U(offset, align) ->
+      emit_load_store(code_instr_i64_load16_u, offset, align)
+    I64Load32S(offset, align) ->
+      emit_load_store(code_instr_i64_load32_s, offset, align)
+    I64Load32U(offset, align) ->
+      emit_load_store(code_instr_i64_load32_u, offset, align)
+    I32Store(offset, align) ->
+      emit_load_store(code_instr_i32_store, offset, align)
+    I64Store(offset, align) ->
+      emit_load_store(code_instr_i64_store, offset, align)
+    F32Store(offset, align) ->
+      emit_load_store(code_instr_f32_store, offset, align)
+    F64Store(offset, align) ->
+      emit_load_store(code_instr_f64_store, offset, align)
+    I32Store8(offset, align) ->
+      emit_load_store(code_instr_i32_store8, offset, align)
+    I32Store16(offset, align) ->
+      emit_load_store(code_instr_i32_store16, offset, align)
+    I64Store8(offset, align) ->
+      emit_load_store(code_instr_i64_store8, offset, align)
+    I64Store16(offset, align) ->
+      emit_load_store(code_instr_i64_store16, offset, align)
+    I64Store32(offset, align) ->
+      emit_load_store(code_instr_i64_store32, offset, align)
+    MemorySize ->
+      bytes_tree.concat_bit_arrays([code_instr_memory_size, <<0x00>>])
+    MemoryGrow ->
+      bytes_tree.concat_bit_arrays([code_instr_memory_grow, <<0x00>>])
+    MemoryFill ->
+      bytes_tree.concat_bit_arrays([code_instr_memory_fill, <<0x00>>])
+    MemoryCopy ->
+      bytes_tree.concat_bit_arrays([code_instr_memory_copy, <<0x00>>, <<0x00>>])
+    MemoryInit(data_index) ->
+      bytes_tree.concat_bit_arrays([
+        code_instr_memory_init,
+        leb128_encode_unsigned(data_index),
+        <<0x00>>,
+      ])
+    DataDrop(data_index) ->
+      bytes_tree.concat_bit_arrays([
+        code_instr_data_drop,
+        leb128_encode_unsigned(data_index),
+      ])
     //
     // Numeric instructions
     I32Const(value) ->
@@ -2389,6 +2752,14 @@ fn encode_instruction(instr: Instruction) -> BytesTree {
     // Vector instructions
     // TODO: vector instructions
   }
+}
+
+fn emit_load_store(instr: BitArray, offset: Int, align: Int) -> BytesTree {
+  bytes_tree.concat_bit_arrays([
+    instr,
+    leb128_encode_unsigned(align),
+    leb128_encode_unsigned(offset),
+  ])
 }
 
 fn encode_block_type(t: BlockType) -> BytesTree {
@@ -2549,6 +2920,8 @@ const section_import = <<2>>
 
 const section_func = <<3>>
 
+const section_memory = <<5>>
+
 const section_global = <<6>>
 
 const section_export = <<7>>
@@ -2556,6 +2929,10 @@ const section_export = <<7>>
 const section_start = <<8>>
 
 const section_code = <<10>>
+
+const section_data = <<11>>
+
+const section_data_count = <<12>>
 
 const names_subsection_module = <<0>>
 
@@ -2570,6 +2947,8 @@ const names_subsection_global = <<7>>
 const names_subsection_field = <<10>>
 
 const code_transport_function = <<0x00>>
+
+const code_transport_memory = <<0x02>>
 
 const code_transport_global = <<0x03>>
 
@@ -2676,6 +3055,68 @@ const code_instr_local_tee = <<0x22>>
 const code_instr_global_get = <<0x23>>
 
 const code_instr_global_set = <<0x24>>
+
+const code_instr_i32_load = <<0x28>>
+
+const code_instr_i64_load = <<0x29>>
+
+const code_instr_f32_load = <<0x2a>>
+
+const code_instr_f64_load = <<0x2b>>
+
+const code_instr_i32_load8_s = <<0x2c>>
+
+const code_instr_i32_load8_u = <<0x2d>>
+
+const code_instr_i32_load16_s = <<0x2e>>
+
+const code_instr_i32_load16_u = <<0x2f>>
+
+const code_instr_i64_load8_s = <<0x30>>
+
+const code_instr_i64_load8_u = <<0x31>>
+
+const code_instr_i64_load16_s = <<0x32>>
+
+const code_instr_i64_load16_u = <<0x33>>
+
+const code_instr_i64_load32_s = <<0x34>>
+
+const code_instr_i64_load32_u = <<0x35>>
+
+const code_instr_i32_store = <<0x36>>
+
+const code_instr_i64_store = <<0x37>>
+
+const code_instr_f32_store = <<0x38>>
+
+const code_instr_f64_store = <<0x39>>
+
+const code_instr_i32_store8 = <<0x3a>>
+
+const code_instr_i32_store16 = <<0x3b>>
+
+const code_instr_i64_store8 = <<0x3c>>
+
+const code_instr_i64_store16 = <<0x3d>>
+
+const code_instr_i64_store32 = <<0x3e>>
+
+const code_instr_memory_size = <<0x3f>>
+
+const code_instr_memory_grow = <<0x40>>
+
+// 0xFC 11:u32
+const code_instr_memory_fill = <<0xfc, 0x0b>>
+
+// 0xFC 10:u32
+const code_instr_memory_copy = <<0xfc, 0x0a>>
+
+// 0xFC 8:u32
+const code_instr_memory_init = <<0xfc, 0x08>>
+
+// 0xFC 9:u32
+const code_instr_data_drop = <<0xfc, 0x09>>
 
 const code_instr_i32_const = <<0x41>>
 

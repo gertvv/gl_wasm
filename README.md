@@ -50,7 +50,7 @@ Create binary WebAssembly modules in Gleam.
  - [x] Type
  - [x] Function/code
  - [ ] Table
- - [ ] Memory
+ - [x] Memory
  - [x] Global
  - [ ] Element
  - [ ] Data/data count
@@ -70,7 +70,7 @@ Create binary WebAssembly modules in Gleam.
  - [ ] i31
  - [ ] Extern
  - [ ] Table
- - [ ] Memory
+ - [x] Memory
  - [x] i32 and i64 encoding
  - [x] f32 and f64 encoding
  - [x] Common i32, i64, f32, f64 instructions
