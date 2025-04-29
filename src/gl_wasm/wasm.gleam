@@ -142,6 +142,7 @@ pub type BuildType {
     mutable: Mutability,
     value_type: ValueType,
   )
+  BuildActiveDataOffset(data_index: Int)
 }
 
 pub type FunctionSignature {
@@ -197,8 +198,8 @@ pub type MemoryDefinition {
 
 pub type DataDefinition {
   PassiveData(init: BitArray)
-  // TODO: ActiveData(init: BitArray, memory_index: Int, offset: List(Instruction))
-  // -> requires a DataBuilder
+  ActiveData(init: BitArray, memory_index: Int, offset: List(Instruction))
+  ActiveDataMissingOffset(init: BitArray, memory_index: Int)
 }
 
 pub type Limits {
@@ -886,7 +887,7 @@ fn create_code_builder(
         list.map(result, Known),
         False,
       )
-    BuildGlobal(..) ->
+    BuildGlobal(..) | BuildActiveDataOffset(..) ->
       Label(
         LabelInitializer,
         0,
@@ -955,7 +956,7 @@ pub fn add_instruction(
   // constant.
   use _ <- result.try(case fb.builds {
     BuildFunction(..) -> Ok(Nil)
-    BuildGlobal(global_index:, ..) -> {
+    BuildGlobal(..) | BuildActiveDataOffset(..) -> {
       case instr {
         // TODO: RefI31, ArrayNew, ArrayNewDefault, ArrayNewFixed, AnyConvertExtern, ExternConvertAny
         I32Const(_)
@@ -968,19 +969,27 @@ pub fn add_instruction(
         | StructNewDefault(_)
         | End -> Ok(Nil)
         GlobalGet(index) -> {
-          case index < global_index, get_global(fb, index) {
-            True, Ok(global) if global.mutable == Immutable -> Ok(Nil)
-            False, _ ->
-              Error("Global initializers may only get preceding globals")
+          case fb.builds, get_global(fb, index) {
+            BuildActiveDataOffset(..), Ok(global)
+              if global.mutable == Immutable
+            -> Ok(Nil)
+            BuildGlobal(global_index:, ..), Ok(global)
+              if global.mutable == Immutable
+            -> {
+              case global_index < index {
+                True -> Ok(Nil)
+                False ->
+                  Error("Global initializers may only get preceding globals")
+              }
+            }
             _, Error(_) ->
               Error(
                 "Global index " <> int.to_string(index) <> " does not exist",
               )
-            _, Ok(_) -> Error("Global initializers may only get const globals")
+            _, Ok(_) -> Error("Initializers may only get const globals")
           }
         }
-        _ ->
-          Error("Only constant expressions are allowed in global initializers")
+        _ -> Error("Only constant expressions are allowed in initializers")
       }
     }
   })
@@ -1914,19 +1923,79 @@ fn add_memory_do(
   }
 }
 
+/// Add a passive data segment.
 pub fn add_passive_data(
   mb: ModuleBuilder,
   init: BitArray,
 ) -> Result(ModuleBuilder, String) {
+  use _ <- result.map(ensure_data_is_bytes(init))
+  ModuleBuilder(
+    ..mb,
+    data: [PassiveData(init), ..mb.data],
+    next_data_index: mb.next_data_index + 1,
+  )
+}
+
+/// Create a builder for an active data segment.
+///
+/// The builder is for code that sets the offset in memory where the data is to be written.
+pub fn create_active_data_builder(
+  mb: ModuleBuilder,
+  init: BitArray,
+  memory_index: Int,
+) -> Result(#(ModuleBuilder, CodeBuilder), String) {
+  use _ <- result.try(ensure_data_is_bytes(init))
+  let data = ActiveDataMissingOffset(init:, memory_index:)
+  let module_builder =
+    ModuleBuilder(
+      ..mb,
+      data: [data, ..mb.data],
+      next_data_index: mb.next_data_index + 1,
+    )
+  create_code_builder(
+    module_builder,
+    BuildActiveDataOffset(data_index: mb.next_data_index),
+    [],
+    [],
+    [I32],
+  )
+  |> result.map(fn(builder) { #(module_builder, builder) })
+}
+
+/// Complete the `CodeBuilder` and replace the corresponding placeholder in
+/// `ModuleBuilder` by the completed active data segment.
+pub fn finalize_active_data(
+  mb: ModuleBuilder,
+  fb: CodeBuilder,
+) -> Result(ModuleBuilder, String) {
+  case fb.builds, fb.label_stack {
+    BuildActiveDataOffset(data_index:), [] ->
+      case get_data_by_index(mb, data_index) {
+        Ok(ActiveDataMissingOffset(init:, memory_index:)) ->
+          list_replace(
+            mb.data,
+            mb.next_data_index - data_index - 1,
+            ActiveData(init:, memory_index:, offset: list.reverse(fb.code)),
+          )
+          |> result.replace_error(
+            "No data at index " <> int.to_string(data_index),
+          )
+          |> result.map(fn(data) { ModuleBuilder(..mb, data:) })
+        Error(msg) -> Error(msg)
+        _ ->
+          Error(
+            "No active data is being built at index "
+            <> int.to_string(data_index),
+          )
+      }
+    BuildActiveDataOffset(..), _ -> Error("Initializer incomplete")
+    _, _ -> Error("CodeBuilder does not build a memory offset for active data")
+  }
+}
+
+fn ensure_data_is_bytes(init: BitArray) -> Result(Nil, String) {
   case bit_array.bit_size(init) % 8 {
-    0 ->
-      Ok(
-        ModuleBuilder(
-          ..mb,
-          data: [PassiveData(init), ..mb.data],
-          next_data_index: mb.next_data_index + 1,
-        ),
-      )
+    0 -> Ok(Nil)
     _ -> Error("Data must be a whole number of bytes")
   }
 }
@@ -2092,9 +2161,10 @@ pub fn emit_module(
   ))
 
   // emit data section
-  let data =
+  use data <- result.try(
     list.reverse(mb.data)
-    |> list.map(encode_data)
+    |> list.try_map(encode_data),
+  )
   use os <- result.try(emit_vector_section_conditional(os, section_data, data))
 
   // emit names
@@ -2318,11 +2388,29 @@ fn encode_limits(limits: Limits) -> BytesTree {
   |> bytes_tree.concat_bit_arrays
 }
 
-fn encode_data(data_definition: DataDefinition) -> BytesTree {
+fn encode_data(
+  data_definition: DataDefinition,
+) -> Result(BytesTree, EmissionError(e)) {
   case data_definition {
-    PassiveData(init) ->
+    PassiveData(init:) ->
       [<<0x01>>, leb128_encode_unsigned(bit_array.byte_size(init)), init]
       |> bytes_tree.concat_bit_arrays
+      |> Ok
+    ActiveData(init:, memory_index:, offset:) -> {
+      let header = case memory_index {
+        0 -> <<0x00>>
+        n -> <<0x02, leb128_encode_unsigned(n):bits>>
+      }
+      [bt(header), ..list.map(offset, encode_instruction)]
+      |> list.append([
+        bt(leb128_encode_unsigned(bit_array.byte_size(init))),
+        bt(init),
+      ])
+      |> bytes_tree.concat
+      |> Ok
+    }
+    ActiveDataMissingOffset(..) ->
+      Error(ValidationError("Unfinalized active data segment"))
   }
 }
 

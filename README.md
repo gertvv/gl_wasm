@@ -53,7 +53,7 @@ Create binary WebAssembly modules in Gleam.
  - [x] Memory
  - [x] Global
  - [ ] Element
- - [ ] Data/data count
+ - [x] Data/data count
  - [x] Start
  - [x] Export
  - [x] Import
