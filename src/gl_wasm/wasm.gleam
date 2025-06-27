@@ -320,10 +320,10 @@ pub type Instruction {
   Loop(block_type: BlockType)
   If(block_type: BlockType)
   Else
-  // FIXME: @deprecated("Use Branch instead")
+  @deprecated("Use Branch instead")
   Break(label_index: Int)
   Branch(label_index: Int)
-  // FIXME: @deprecated("Use BranchIf instead")
+  @deprecated("Use BranchIf instead")
   BreakIf(label_index: Int)
   BranchIf(label_index: Int)
   // TODO: BreakTable
@@ -334,10 +334,10 @@ pub type Instruction {
   // TODO: ReturnCallIndirect
   CallRef(type_index: Int)
   ReturnCallRef(type_index: Int)
-  // FIXME: @deprecated("Use BranchOnNull instead")
+  @deprecated("Use BranchOnNull instead")
   BreakOnNull(label_index: Int)
   BranchOnNull(label_index: Int)
-  // FIXME: @deprecated("Use BranchOnNonNull instead")
+  @deprecated("Use BranchOnNonNull instead")
   BreakOnNonNull(label_index: Int)
   BranchOnNonNull(label_index: Int)
   // TODO: BreakOnCast*
@@ -357,6 +357,15 @@ pub type Instruction {
   StructGetS(type_index: Int, field_index: Int)
   StructGetU(type_index: Int, field_index: Int)
   StructSet(type_index: Int, field_index: Int)
+  ArrayNew(type_index: Int)
+  ArrayNewDefault(type_index: Int)
+  // TODO: ArrayNewFixed, ArrayNewElem, ArrayNewData
+  ArrayGet(type_index: Int)
+  ArrayGetS(type_index: Int)
+  ArrayGetU(type_index: Int)
+  ArraySet(type_index: Int)
+  ArrayLen
+  // TODO: ArrayCopy, ArrayInitElem, ArrayInitData
   // TODO: remaining reference instructions
   //
   // Parametric instructions
@@ -958,8 +967,10 @@ pub fn add_instruction(
     BuildFunction(..) -> Ok(Nil)
     BuildGlobal(..) | BuildActiveDataOffset(..) -> {
       case instr {
-        // TODO: RefI31, ArrayNew, ArrayNewDefault, ArrayNewFixed, AnyConvertExtern, ExternConvertAny
-        I32Const(_)
+        // TODO: RefI31, AnyConvertExtern, ExternConvertAny
+        ArrayNew(_)
+        | ArrayNewDefault(_)
+        | I32Const(_)
         | I64Const(_)
         | F32Const(_)
         | F64Const(_)
@@ -1212,63 +1223,63 @@ pub fn add_instruction(
     StructGet(type_index, field_index)
     | StructGetS(type_index, field_index)
     | StructGetU(type_index, field_index) -> {
-      let packed = case instr {
-        StructGetS(_, _) -> True
-        StructGetU(_, _) -> True
-        _ -> False
-      }
-      use t <- result.try(get_type(fb, type_index))
-      case t {
-        Struct(field_types:, ..) ->
-          list_index(field_types, field_index)
-          |> result.replace_error(
-            "Struct type $"
-            <> int.to_string(type_index)
-            <> " does not have field index "
-            <> int.to_string(field_index),
-          )
-          |> result.try(fn(field) {
-            case packed, field {
-              False, PackedType(..) ->
-                Error("struct.get not applicable to packed fields")
-              False, ValueType(value_type:, ..) -> Ok(value_type)
-              True, PackedType(..) -> Ok(I32)
-              True, ValueType(..) ->
-                Error("struct.get_[s|u] not applicable to value types")
-            }
-          })
-        _ -> Error("Type $" <> int.to_string(type_index) <> " is not a struct")
-      }
-      |> result.try(fn(t) {
-        pop_push_known(fb, [Ref(Nullable(ConcreteType(type_index)))], [t])
+      use st <- result.try(get_type(fb, type_index))
+      use pt <- result.try(get_struct_field_type(st, type_index, field_index))
+      use ft <- result.try(case is_packed_get(instr), pt {
+        False, PackedType(..) ->
+          Error("struct.get not applicable to packed fields")
+        False, ValueType(value_type:, ..) -> Ok(value_type)
+        True, PackedType(..) -> Ok(I32)
+        True, ValueType(..) ->
+          Error("struct.get_[s|u] not applicable to value types")
       })
+      pop_push_known(fb, [Ref(Nullable(ConcreteType(type_index)))], [ft])
     }
     StructSet(type_index, field_index) -> {
-      use t <- result.try(get_type(fb, type_index))
-      case t {
-        Struct(field_types:, ..) ->
-          list_index(field_types, field_index)
-          |> result.replace_error(
-            "Struct type $"
-            <> int.to_string(type_index)
-            <> " does not have field index "
-            <> int.to_string(field_index),
-          )
-          |> result.try(fn(field) {
-            case field {
-              PackedType(mutable: Immutable, ..)
-              | ValueType(mutable: Immutable, ..) ->
-                Error("struct.set on immutable field")
-              PackedType(mutable: Mutable, ..) -> Ok(I32)
-              ValueType(mutable: Mutable, value_type:, ..) -> Ok(value_type)
-            }
-          })
-        _ -> Error("Type $" <> int.to_string(type_index) <> " is not a struct")
-      }
-      |> result.try(fn(t) {
-        pop_push_known(fb, [t, Ref(Nullable(ConcreteType(type_index)))], [])
+      use st <- result.try(get_type(fb, type_index))
+      use pt <- result.try(get_struct_field_type(st, type_index, field_index))
+      use ft <- result.try(case pt {
+        PackedType(mutable: Immutable, ..) | ValueType(mutable: Immutable, ..) ->
+          Error("struct.set on immutable field")
+        PackedType(mutable: Mutable, ..) -> Ok(I32)
+        ValueType(mutable: Mutable, value_type:, ..) -> Ok(value_type)
       })
+      pop_push_known(fb, [ft, Ref(Nullable(ConcreteType(type_index)))], [])
     }
+    ArrayNew(type_index) -> {
+      use at <- result.try(get_type(fb, type_index))
+      use it <- result.try(unpack_array_item_type(at, type_index))
+      pop_push_known(fb, [I32, it], [Ref(NonNull(ConcreteType(type_index)))])
+    }
+    ArrayNewDefault(type_index) -> {
+      use at <- result.try(get_type(fb, type_index))
+      use _ <- result.try(unpack_array_item_type(at, type_index))
+      pop_push_known(fb, [I32], [Ref(NonNull(ConcreteType(type_index)))])
+    }
+    ArrayGet(type_index) | ArrayGetS(type_index) | ArrayGetU(type_index) -> {
+      use at <- result.try(get_type(fb, type_index))
+      use pt <- result.try(get_array_item_type(at, type_index))
+      use it <- result.try(case is_packed_get(instr), pt {
+        False, PackedType(..) ->
+          Error("array.get not applicable to packed fields")
+        False, ValueType(value_type:, ..) -> Ok(value_type)
+        True, PackedType(..) -> Ok(I32)
+        True, ValueType(..) ->
+          Error("array.get_[s|u] not applicable to value types")
+      })
+      pop_push_known(fb, [I32, Ref(Nullable(ConcreteType(type_index)))], [it])
+    }
+    ArraySet(type_index) -> {
+      use at <- result.try(get_type(fb, type_index))
+      use pt <- result.try(get_array_item_type(at, type_index))
+      use <- bool.guard(
+        pt.mutable != Mutable,
+        Error("array.set on an immutable array"),
+      )
+      use it <- result.try(unpack_array_item_type(at, type_index))
+      pop_push_known(fb, [it, I32, Ref(Nullable(ConcreteType(type_index)))], [])
+    }
+    ArrayLen -> pop_push_known(fb, [Ref(Nullable(AbstractArray))], [I32])
     LocalGet(local_index) ->
       get_local(fb, local_index)
       |> result.try(fn(t) { pop_push_known(fb, [], [t]) })
@@ -1687,6 +1698,13 @@ fn bottom_label(fb: CodeBuilder) -> Result(Label, String) {
   |> result.replace_error("Label stack is empty")
 }
 
+fn is_packed_get(instr: Instruction) -> Bool {
+  case instr {
+    StructGetS(..) | StructGetU(..) | ArrayGetS(..) | ArrayGetU(..) -> True
+    _ -> False
+  }
+}
+
 fn unpack_struct_fields(
   ct: CompositeType,
   type_index: Int,
@@ -1695,6 +1713,42 @@ fn unpack_struct_fields(
     Struct(field_types:, ..) ->
       Ok(list.map(field_types, unpack_packed_field) |> list.reverse)
     _ -> Error("Type $" <> int.to_string(type_index) <> " is not a struct")
+  }
+}
+
+fn unpack_array_item_type(
+  ct: CompositeType,
+  type_index: Int,
+) -> Result(ValueType, String) {
+  get_array_item_type(ct, type_index)
+  |> result.map(unpack_packed_field)
+}
+
+fn get_struct_field_type(
+  ct: CompositeType,
+  type_index: Int,
+  field_index: Int,
+) -> Result(FieldType, String) {
+  case ct {
+    Struct(field_types:, ..) ->
+      list_index(field_types, field_index)
+      |> result.replace_error(
+        "Struct type $"
+        <> int.to_string(type_index)
+        <> " does not have field index "
+        <> int.to_string(field_index),
+      )
+    _ -> Error("Type $" <> int.to_string(type_index) <> " is not a struct")
+  }
+}
+
+fn get_array_item_type(
+  ct: CompositeType,
+  type_index: Int,
+) -> Result(FieldType, String) {
+  case ct {
+    Array(item_type:, ..) -> Ok(item_type)
+    _ -> Error("Type $" <> int.to_string(type_index) <> " is not an array")
   }
 }
 
@@ -2608,6 +2662,37 @@ fn encode_instruction(instr: Instruction) -> BytesTree {
         leb128_encode_unsigned(type_index),
         leb128_encode_unsigned(field_index),
       ])
+    ArrayNew(type_index) ->
+      bytes_tree.concat_bit_arrays([
+        code_instr_array_new,
+        leb128_encode_unsigned(type_index),
+      ])
+    ArrayNewDefault(type_index) ->
+      bytes_tree.concat_bit_arrays([
+        code_instr_array_new_default,
+        leb128_encode_unsigned(type_index),
+      ])
+    ArrayGet(type_index) ->
+      bytes_tree.concat_bit_arrays([
+        code_instr_array_get,
+        leb128_encode_unsigned(type_index),
+      ])
+    ArrayGetS(type_index) ->
+      bytes_tree.concat_bit_arrays([
+        code_instr_array_get_s,
+        leb128_encode_unsigned(type_index),
+      ])
+    ArrayGetU(type_index) ->
+      bytes_tree.concat_bit_arrays([
+        code_instr_array_get_u,
+        leb128_encode_unsigned(type_index),
+      ])
+    ArraySet(type_index) ->
+      bytes_tree.concat_bit_arrays([
+        code_instr_array_set,
+        leb128_encode_unsigned(type_index),
+      ])
+    ArrayLen -> bytes_tree.concat_bit_arrays([code_instr_array_len])
     // TODO: remaining reference instructions
     //
     // Parametric instructions
@@ -3431,6 +3516,20 @@ const code_instr_struct_get_s = <<0xfb, 0x03>>
 const code_instr_struct_get_u = <<0xfb, 0x04>>
 
 const code_instr_struct_set = <<0xfb, 0x05>>
+
+const code_instr_array_new = <<0xfb, 0x06>>
+
+const code_instr_array_new_default = <<0xfb, 0x07>>
+
+const code_instr_array_get = <<0xfb, 0x11>>
+
+const code_instr_array_get_s = <<0xfb, 0x12>>
+
+const code_instr_array_get_u = <<0xfb, 0x13>>
+
+const code_instr_array_set = <<0xfb, 0x14>>
+
+const code_instr_array_len = <<0xfb, 0x15>>
 
 const code_instr_ref_test_nonnull = <<0xfb, 0x14>>
 
