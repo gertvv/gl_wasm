@@ -1,0 +1,13 @@
+---
+version: 1.4.0
+title: func with  typed if/else
+file: ./test/gl_wasm/wasm_test.gleam
+test_name: if_else_test
+---
+(func (type 0)
+  local.get 0
+  if (result i64)
+  i64.const 42
+  else
+  i64.const 0
+  end)

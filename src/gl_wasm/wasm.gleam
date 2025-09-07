@@ -9,7 +9,9 @@ import gleam/bytes_tree.{type BytesTree, from_bit_array as bt}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/pair
 import gleam/result
+import gleam/string
 import gleb128
 import ieee_float.{type IEEEFloat}
 
@@ -1795,7 +1797,7 @@ fn heap_type_to_string(t: HeapType) {
     AbstractNoFunc -> "nofunc"
     AbstractNone -> "none"
     AbstractStruct -> "struct"
-    ConcreteType(idx) -> "$" <> int.to_string(idx)
+    ConcreteType(idx) -> int.to_string(idx)
   }
 }
 
@@ -3078,6 +3080,319 @@ fn encode_indirect_name_map(
         )
       })
       |> encode_vector
+  }
+}
+
+// --------------------------------------------------------------------------- 
+// WebAssembly text
+// --------------------------------------------------------------------------- 
+
+fn instr1(name, idx) {
+  name <> " " <> int.to_string(idx)
+}
+
+fn instr2(name, idx1, idx2) {
+  name <> " " <> int.to_string(idx1) <> " " <> int.to_string(idx2)
+}
+
+fn instr_block(name, block_type: BlockType) {
+  case block_type {
+    BlockEmpty -> name
+    BlockValue(value_type) ->
+      name <> " (result " <> value_type_to_string(value_type) <> ")"
+  }
+}
+
+fn instr_mem(name, offset, align) {
+  name
+  <> " offset="
+  <> int.to_string(offset)
+  <> " align="
+  <> int.to_string(align)
+}
+
+fn ref_type_to_string(ref_type: RefType) {
+  case ref_type {
+    NonNull(heap_type) -> "(ref " <> heap_type_to_string(heap_type) <> ")"
+    Nullable(heap_type) -> "(ref null " <> heap_type_to_string(heap_type) <> ")"
+  }
+}
+
+fn instruction_to_string(instr: Instruction) -> String {
+  case instr {
+    // Control instructions
+    Unreachable -> "unreachable"
+    Nop -> "nop"
+    Block(block_type) -> instr_block("block", block_type)
+    Loop(block_type) -> instr_block("loop", block_type)
+    If(block_type) -> instr_block("if", block_type)
+    Else -> "else"
+    Break(label_index) | Branch(label_index) -> instr1("br", label_index)
+    BreakIf(label_index) | BranchIf(label_index) -> instr1("br_if", label_index)
+    // TODO: BreakTable
+    Return -> "return"
+    Call(function_index) -> instr1("call", function_index)
+    // TODO: CallIndirect
+    ReturnCall(function_index) -> instr1("return_call", function_index)
+    // TODO: ReturnCallIndirect
+    CallRef(type_index) -> instr1("call_ref", type_index)
+    ReturnCallRef(type_index) -> instr1("return_call_ref", type_index)
+    BreakOnNull(label_index) | BranchOnNull(label_index) ->
+      instr1("br_on_null", label_index)
+    BreakOnNonNull(label_index) | BranchOnNonNull(label_index) ->
+      instr1("br_on_non_null", label_index)
+    // TODO: BreakOnCast*
+    End -> "end"
+    //
+    // Reference instructions
+    RefNull(heap_type) -> "ref.null " <> heap_type_to_string(heap_type)
+    RefFunc(function_index) -> instr1("ref.func", function_index)
+    RefIsNull -> "ref.is_null"
+    RefAsNonNull -> "ref.as_non_null"
+    RefEq -> "ref.eq"
+    RefTest(ref_type) -> "ref.test " <> ref_type_to_string(ref_type)
+    RefCast(ref_type) -> "ref.cast " <> ref_type_to_string(ref_type)
+    StructNew(type_index) -> instr1("struct.new", type_index)
+    StructNewDefault(type_index) -> instr1("struct.new_default", type_index)
+    StructGet(type_index, field_index) ->
+      instr2("struct.get", type_index, field_index)
+    StructGetS(type_index, field_index) ->
+      instr2("struct.get_s", type_index, field_index)
+    StructGetU(type_index, field_index) ->
+      instr2("struct.get_u", type_index, field_index)
+    StructSet(type_index, field_index) ->
+      instr2("struct.set", type_index, field_index)
+    ArrayNew(type_index) -> instr1("array.new", type_index)
+    ArrayNewDefault(type_index) -> instr1("array.new_default", type_index)
+    // TODO: ArrayNewFixed, ArrayNewElem, ArrayNewData
+    ArrayGet(type_index) -> instr1("array.get", type_index)
+    ArrayGetS(type_index) -> instr1("array.get_s", type_index)
+    ArrayGetU(type_index) -> instr1("array.get_u", type_index)
+    ArraySet(type_index) -> instr1("array.set", type_index)
+    ArrayLen -> "array.len"
+    // TODO: ArrayCopy, ArrayInitElem, ArrayInitData
+    // TODO: remaining reference instructions
+    //
+    // Parametric instructions
+    Drop -> "drop"
+    Select(value_types) ->
+      value_types
+      |> list.map(fn(value_type) {
+        "(result " <> value_type_to_string(value_type) <> ")"
+      })
+      |> string.join(" ")
+      |> string.append("select ", _)
+    //
+    // Variable instructions
+    LocalGet(local_index) -> instr1("local.get", local_index)
+    LocalSet(local_index) -> instr1("local.set", local_index)
+    LocalTee(local_index) -> instr1("local.tee", local_index)
+    GlobalGet(global_index) -> instr1("global.get", global_index)
+    GlobalSet(global_index) -> instr1("global.set", global_index)
+    //
+    // Table instructions
+    // TODO: table instructions
+    //
+    // Memory instructions
+    I32Load(offset, align) -> instr_mem("i32.load", offset, align)
+    I64Load(offset, align) -> instr_mem("i64.load", offset, align)
+    F32Load(offset, align) -> instr_mem("f32.load", offset, align)
+    F64Load(offset, align) -> instr_mem("f64.load", offset, align)
+    I32Load8S(offset, align) -> instr_mem("i32.load8_s", offset, align)
+    I32Load8U(offset, align) -> instr_mem("i32.load8_u", offset, align)
+    I32Load16S(offset, align) -> instr_mem("i32.load16_s", offset, align)
+    I32Load16U(offset, align) -> instr_mem("i32.load16_u", offset, align)
+    I64Load8S(offset, align) -> instr_mem("i64.load8_s", offset, align)
+    I64Load8U(offset, align) -> instr_mem("i64.load8_u", offset, align)
+    I64Load16S(offset, align) -> instr_mem("i64.load16_s", offset, align)
+    I64Load16U(offset, align) -> instr_mem("i64.load16_u", offset, align)
+    I64Load32S(offset, align) -> instr_mem("i64.load32_s", offset, align)
+    I64Load32U(offset, align) -> instr_mem("i64.load32_u", offset, align)
+    I32Store(offset, align) -> instr_mem("i32.store", offset, align)
+    I64Store(offset, align) -> instr_mem("i64.store", offset, align)
+    F32Store(offset, align) -> instr_mem("f32.store", offset, align)
+    F64Store(offset, align) -> instr_mem("f64.store", offset, align)
+    I32Store8(offset, align) -> instr_mem("i32.store8", offset, align)
+    I32Store16(offset, align) -> instr_mem("i32.store16", offset, align)
+    I64Store8(offset, align) -> instr_mem("i64.store8", offset, align)
+    I64Store16(offset, align) -> instr_mem("i64.store16", offset, align)
+    I64Store32(offset, align) -> instr_mem("i64.store32", offset, align)
+    MemorySize -> "memory.size"
+    MemoryGrow -> "memory.grow"
+    MemoryFill -> "memory.fill"
+    MemoryCopy -> "memory.copy"
+    MemoryInit(data_index) -> instr1("memory.init", data_index)
+    DataDrop(data_index) -> instr1("data.drop", data_index)
+    //
+    // Numeric instructions
+    I32Const(value) -> "i32.const " <> int.to_string(value.int)
+    I64Const(value) -> "i64.const " <> int.to_string(value.int)
+    F32Const(value) -> "f32.const " <> ieee_float.to_string(value)
+    F64Const(value) -> "f64.const " <> ieee_float.to_string(value)
+    I32EqZ -> "i32.eqz"
+    I32Eq -> "i32.eq"
+    I32NE -> "i32.ne"
+    I32LtS -> "i32.lt_s"
+    I32LtU -> "i32.lt_u"
+    I32GtS -> "i32.gt_s"
+    I32GtU -> "i32.gt_u"
+    I32LeS -> "i32.le_s"
+    I32LeU -> "i32.le_u"
+    I32GeS -> "i32.ge_s"
+    I32GeU -> "i32.ge_u"
+    I64EqZ -> "i64.eqz"
+    I64Eq -> "i64.eq"
+    I64NE -> "i64.ne"
+    I64LtS -> "i64.lt_s"
+    I64LtU -> "i64.lt_u"
+    I64GtS -> "i64.gt_s"
+    I64GtU -> "i64.gt_u"
+    I64LeS -> "i64.le_s"
+    I64LeU -> "i64.le_u"
+    I64GeS -> "i64.ge_s"
+    I64GeU -> "i64.ge_u"
+    F32Eq -> "f32.eq"
+    F32NE -> "f32.ne"
+    F32Lt -> "f32.lt"
+    F32Gt -> "f32.gt"
+    F32Le -> "f32.le"
+    F32Ge -> "f32.ge"
+    F64Eq -> "f64.eq"
+    F64NE -> "f64.ne"
+    F64Lt -> "f64.lt"
+    F64Gt -> "f64.gt"
+    F64Le -> "f64.le"
+    F64Ge -> "f64.ge"
+    I32CntLZ -> todo
+    I32CntTZ -> todo
+    I32PopCnt -> "i32.popcnt"
+    I32Add -> "i32.add"
+    I32Sub -> "i32.sub"
+    I32Mul -> "i32.mul"
+    I32DivS -> "i32.div_s"
+    I32DivU -> "i32.div_u"
+    I32RemS -> "i32.rem_s"
+    I32RemU -> "i32.rem_u"
+    I32And -> "i32.and"
+    I32Or -> "i32.or"
+    I32Xor -> "i32.xor"
+    I32ShL -> "i32.shl"
+    I32ShRS -> "i32.shr_s"
+    I32ShLU -> "i32.shr_u"
+    I32RotL -> "i32.rotl"
+    I32RotR -> "i32.rotr"
+    I64CntLZ -> todo
+    I64CntTZ -> todo
+    I64PopCnt -> "i64.popcnt"
+    I64Add -> "i64.add"
+    I64Sub -> "i64.sub"
+    I64Mul -> "i64.mul"
+    I64DivS -> "i64.div_s"
+    I64DivU -> "i64.div_u"
+    I64RemS -> "i64.rem_s"
+    I64RemU -> "i64.rem_u"
+    I64And -> "i64.and"
+    I64Or -> "i64.or"
+    I64Xor -> "i64.xor"
+    I64ShL -> "i64.shl"
+    I64ShRS -> "i64.shr_s"
+    I64ShLU -> "i64.shr_u"
+    I64RotL -> "i64.rotl"
+    I64RotR -> "i64.rotr"
+    F32Abs -> "f32.abs"
+    F32Neg -> "f32.neg"
+    F32Ceil -> "f32.ceil"
+    F32Floor -> "f32.floor"
+    F32Trunc -> "f32.trunc"
+    F32Nearest -> "f32.nearest"
+    F32Sqrt -> "f32.sqrt"
+    F32Add -> "f32.add"
+    F32Sub -> "f32.sub"
+    F32Mul -> "f32.mul"
+    F32Div -> "f32.div"
+    F32Min -> "f32.min"
+    F32Max -> "f32.max"
+    F32CopySign -> "f32.copysign"
+    F64Abs -> "f64.abs"
+    F64Neg -> "f64.neg"
+    F64Ceil -> "f64.ceil"
+    F64Floor -> "f64.floor"
+    F64Trunc -> "f64.trunc"
+    F64Nearest -> "f64.nearest"
+    F64Sqrt -> "f64.sqrt"
+    F64Add -> "f64.add"
+    F64Sub -> "f64.sub"
+    F64Mul -> "f64.mul"
+    F64Div -> "f64.div"
+    F64Min -> "f64.min"
+    F64Max -> "f64.max"
+    F64CopySign -> "f64.copysign"
+    // TODO: conversions / truncations / etc.
+    //
+    // Vector instructions
+    // TODO: vector instructions
+  }
+}
+
+fn indent(lines: List(String), by: String) -> String {
+  list.map(lines, fn(line) { "  " <> line })
+  |> string.join("\n")
+}
+
+/// Convert a function definition to a WebAssembly Text (WAT) string.
+/// This is useful e.g. for snapshot testing.
+/// The output is intentionally close to the binary format, rather than
+/// optimized for human readability. For examples, instructions are not
+/// displayed in folded form.
+///
+/// The output for a FunctionImplementation may look as follows:
+/// ```
+/// (func (type 0)
+///   local.get 0
+///   local.get 1
+///   i32.add)
+/// ```
+///
+/// While the output for a FunctionImport may look like this:
+/// ```
+/// (import
+///   "util" "strlen"
+///   (func (type 1)))
+/// ````
+///
+/// Finally, for FunctionMissing, the output is not valid WAT:
+/// ```
+/// (func (type 0)
+///   ...)
+/// ```
+pub fn function_to_string(def: FunctionDefinition) -> String {
+  let open = "(func " <> "(type " <> int.to_string(def.type_index) <> ")"
+  case def {
+    FunctionImplementation(local_names:, locals:, code:, ..) -> {
+      // drop the final "end"
+      // TODO: consider changing API so final 'end' is implicit
+      let code =
+        list.split(code, list.length(code) - 1)
+        |> pair.first
+        |> list.map(instruction_to_string)
+      let locals =
+        list.zip(local_names, locals)
+        |> list.map(fn(local) {
+          let #(name, vt) = local
+          "(local " <> value_type_to_string(vt) <> ")"
+        })
+      let body = list.append(locals, code) |> indent("  ")
+      open <> "\n" <> body <> ")"
+    }
+    FunctionImport(from:, ..) ->
+      "(import \n  \""
+      <> from.module
+      <> "\" \""
+      <> from.name
+      <> "\"\n  "
+      <> open
+      <> "))"
+    FunctionMissing(..) -> open <> "\n  ...\n)"
   }
 }
 

@@ -1,3 +1,4 @@
+import birdie
 import gl_wasm/wasm
 import gleam/bytes_tree
 import gleam/list
@@ -92,9 +93,11 @@ pub fn too_many_return_values_test() {
 
 pub fn i64_add_test() {
   let code = [i64_const(41), i64_const(1), wasm.I64Add, wasm.End]
-  simple_func([], [wasm.I64], code)
-  |> result.try(simple_finalize)
-  |> should.equal(Ok(wasm.FunctionImplementation(0, None, [], [], code)))
+  let assert Ok(def) =
+    simple_func([], [wasm.I64], code)
+    |> result.try(simple_finalize)
+  wasm.function_to_string(def)
+  |> birdie.snap(title: "func adding two i64 constants")
 }
 
 pub fn i64_add_missing_arg_test() {
@@ -232,9 +235,10 @@ pub fn if_else_test() {
     wasm.End,
     wasm.End,
   ]
-  simple_func([wasm.I32], [wasm.I64], code)
-  |> result.try(simple_finalize)
-  |> should.be_ok
+  let assert Ok(def) =
+    simple_func([wasm.I32], [wasm.I64], code)
+    |> result.try(simple_finalize)
+  wasm.function_to_string(def) |> birdie.snap(title: "func with  typed if/else")
 }
 
 pub fn if_implicit_else_with_result_test() {
@@ -491,7 +495,7 @@ pub fn return_incorrect_nullability_test() {
   let ref_nullable = wasm.Ref(wasm.Nullable(wasm.ConcreteType(0)))
   let ref_non_null = wasm.Ref(wasm.NonNull(wasm.ConcreteType(0)))
   prepared_func(mb, [ref_nullable], [ref_non_null], [wasm.LocalGet(0), wasm.End])
-  |> should.equal(Error("Expected (ref $0) at height 0 but got (ref null $0)"))
+  |> should.equal(Error("Expected (ref 0) at height 0 but got (ref null 0)"))
 }
 
 pub fn ref_as_non_null_test() {
@@ -643,7 +647,7 @@ pub fn struct_get_non_struct_test() {
     wasm.LocalGet(0),
     wasm.StructGet(0, 0),
   ])
-  |> should.equal(Error("Expected (ref null $0) at height 0 but got i64"))
+  |> should.equal(Error("Expected (ref null 0) at height 0 but got i64"))
 }
 
 pub fn struct_set_test() {

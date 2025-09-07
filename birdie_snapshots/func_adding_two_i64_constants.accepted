@@ -1,0 +1,10 @@
+---
+version: 1.4.0
+title: func adding two i64 constants
+file: ./test/gl_wasm/wasm_test.gleam
+test_name: i64_add_test
+---
+(func (type 0)
+  i64.const 41
+  i64.const 1
+  i64.add)
