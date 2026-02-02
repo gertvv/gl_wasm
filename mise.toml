@@ -2,4 +2,4 @@
 "npm:binaryen" = "118"
 elixir = "latest"
 erlang = "latest"
-gleam = "1.10"
+gleam = "1.14"

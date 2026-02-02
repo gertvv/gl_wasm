@@ -2238,9 +2238,9 @@ fn emit_vector_section_conditional(
   section_id: BitArray,
   vector: List(BytesTree),
 ) -> Result(OutputStream(s, e), EmissionError(e)) {
-  case list.length(vector) > 0 {
-    True -> write_bytes(os, encode_section(section_id, encode_vector(vector)))
-    False -> Ok(os)
+  case vector == [] {
+    False -> write_bytes(os, encode_section(section_id, encode_vector(vector)))
+    True -> Ok(os)
   }
 }
 
