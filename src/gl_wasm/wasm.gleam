@@ -908,7 +908,7 @@ fn create_code_builder(
       )
   }
   case list.length(params) == list.length(param_names) {
-    False -> Error("param_names must have same lenght as params")
+    False -> Error("param_names must have same length as params")
     True ->
       Ok(
         CodeBuilder(
