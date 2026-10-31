@@ -3820,36 +3820,36 @@ const code_instr_ref_eq = <<0xd3>>
 
 const code_instr_ref_as_non_null = <<0xd4>>
 
-const code_instr_struct_new = <<0xfb, 0x00>>
+const code_instr_struct_new = <<0xfb, 0>>
 
-const code_instr_struct_new_default = <<0xfb, 0x01>>
+const code_instr_struct_new_default = <<0xfb, 1>>
 
-const code_instr_struct_get = <<0xfb, 0x02>>
+const code_instr_struct_get = <<0xfb, 2>>
 
-const code_instr_struct_get_s = <<0xfb, 0x03>>
+const code_instr_struct_get_s = <<0xfb, 3>>
 
-const code_instr_struct_get_u = <<0xfb, 0x04>>
+const code_instr_struct_get_u = <<0xfb, 4>>
 
-const code_instr_struct_set = <<0xfb, 0x05>>
+const code_instr_struct_set = <<0xfb, 5>>
 
-const code_instr_array_new = <<0xfb, 0x06>>
+const code_instr_array_new = <<0xfb, 6>>
 
-const code_instr_array_new_default = <<0xfb, 0x07>>
+const code_instr_array_new_default = <<0xfb, 7>>
 
-const code_instr_array_get = <<0xfb, 0x11>>
+const code_instr_array_get = <<0xfb, 11>>
 
-const code_instr_array_get_s = <<0xfb, 0x12>>
+const code_instr_array_get_s = <<0xfb, 12>>
 
-const code_instr_array_get_u = <<0xfb, 0x13>>
+const code_instr_array_get_u = <<0xfb, 13>>
 
-const code_instr_array_set = <<0xfb, 0x14>>
+const code_instr_array_set = <<0xfb, 14>>
 
-const code_instr_array_len = <<0xfb, 0x15>>
+const code_instr_array_len = <<0xfb, 15>>
 
-const code_instr_ref_test_nonnull = <<0xfb, 0x14>>
+const code_instr_ref_test_nonnull = <<0xfb, 20>>
 
-const code_instr_ref_test_nullable = <<0xfb, 0x15>>
+const code_instr_ref_test_nullable = <<0xfb, 21>>
 
-const code_instr_ref_cast_nonnull = <<0xfb, 0x16>>
+const code_instr_ref_cast_nonnull = <<0xfb, 22>>
 
-const code_instr_ref_cast_nullable = <<0xfb, 0x17>>
+const code_instr_ref_cast_nullable = <<0xfb, 23>>
