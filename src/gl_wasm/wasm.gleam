@@ -361,13 +361,18 @@ pub type Instruction {
   StructSet(type_index: Int, field_index: Int)
   ArrayNew(type_index: Int)
   ArrayNewDefault(type_index: Int)
-  // TODO: ArrayNewFixed, ArrayNewElem, ArrayNewData
+  ArrayNewFixed(type_index: Int, size: Int)
+  ArrayNewData(type_index: Int, data_index: Int)
+  // TODO: ArrayNewElem
   ArrayGet(type_index: Int)
   ArrayGetS(type_index: Int)
   ArrayGetU(type_index: Int)
   ArraySet(type_index: Int)
   ArrayLen
-  // TODO: ArrayCopy, ArrayInitElem, ArrayInitData
+  ArrayFill(type_index: Int)
+  ArrayCopy(type_index: Int, source_type_index: Int)
+  ArrayInitData(type_index: Int, data_index: Int)
+  // TODO: ArrayInitElem
   // TODO: remaining reference instructions
   //
   // Parametric instructions
@@ -1258,6 +1263,23 @@ pub fn add_instruction(
       use _ <- result.try(unpack_array_item_type(at, type_index))
       pop_push_known(fb, [I32], [Ref(NonNull(ConcreteType(type_index)))])
     }
+    ArrayNewFixed(type_index:, size:) -> {
+      use at <- result.try(get_type(fb, type_index))
+      use it <- result.try(unpack_array_item_type(at, type_index))
+      pop_push_known(fb, list.repeat(it, size), [
+        Ref(NonNull(ConcreteType(type_index))),
+      ])
+    }
+    ArrayNewData(type_index:, data_index:) -> {
+      use at <- result.try(get_type(fb, type_index))
+      use it <- result.try(unpack_array_item_type(at, type_index))
+      use _ <- result.try(case it {
+        I32 | F32 | I64 | F64 | V128 -> Ok(Nil)
+        _ -> Error("array.new_data requires fieldtype to be numeric or vector")
+      })
+      use _ <- result.try(get_data(fb, data_index))
+      pop_push_known(fb, [I32, I32], [Ref(NonNull(ConcreteType(type_index)))])
+    }
     ArrayGet(type_index) | ArrayGetS(type_index) | ArrayGetU(type_index) -> {
       use at <- result.try(get_type(fb, type_index))
       use pt <- result.try(get_array_item_type(at, type_index))
@@ -1282,6 +1304,62 @@ pub fn add_instruction(
       pop_push_known(fb, [it, I32, Ref(Nullable(ConcreteType(type_index)))], [])
     }
     ArrayLen -> pop_push_known(fb, [Ref(Nullable(AbstractArray))], [I32])
+    ArrayFill(type_index:) -> {
+      use at <- result.try(get_type(fb, type_index))
+      use pt <- result.try(get_array_item_type(at, type_index))
+      use <- bool.guard(
+        pt.mutable != Mutable,
+        Error("array.fill on an immutable array"),
+      )
+      use it <- result.try(unpack_array_item_type(at, type_index))
+      pop_push_known(
+        fb,
+        [I32, it, I32, Ref(Nullable(ConcreteType(type_index)))],
+        [],
+      )
+    }
+    ArrayCopy(type_index:, source_type_index:) -> {
+      use at1 <- result.try(get_type(fb, type_index))
+      use pt1 <- result.try(get_array_item_type(at1, type_index))
+      use <- bool.guard(
+        pt1.mutable != Mutable,
+        Error("array.copy on an immutable array"),
+      )
+      use at2 <- result.try(get_type(fb, type_index))
+      use pt2 <- result.try(get_array_item_type(at2, type_index))
+      // TODO: check if the storage types match
+      use _ <- result.try(match_storage_types(pt1, pt2))
+      pop_push_known(
+        fb,
+        [
+          I32,
+          I32,
+          Ref(Nullable(ConcreteType(source_type_index))),
+          I32,
+          Ref(Nullable(ConcreteType(type_index))),
+        ],
+        [],
+      )
+    }
+    ArrayInitData(type_index:, data_index:) -> {
+      use at <- result.try(get_type(fb, type_index))
+      use pt <- result.try(get_array_item_type(at, type_index))
+      use <- bool.guard(
+        pt.mutable != Mutable,
+        Error("array.init_data on an immutable array"),
+      )
+      use it <- result.try(unpack_array_item_type(at, type_index))
+      use _ <- result.try(case it {
+        I32 | F32 | I64 | F64 | V128 -> Ok(Nil)
+        _ -> Error("array.init_data requires fieldtype to be numeric or vector")
+      })
+      use _ <- result.try(get_data(fb, data_index))
+      pop_push_known(
+        fb,
+        [I32, I32, I32, Ref(NonNull(ConcreteType(type_index)))],
+        [],
+      )
+    }
     LocalGet(local_index) ->
       get_local(fb, local_index)
       |> result.try(fn(t) { pop_push_known(fb, [], [t]) })
@@ -1454,6 +1532,61 @@ pub fn add_instruction(
       pop_push_known(fb, [F64, F64], [F64])
   }
   |> result.map(fn(fb) { CodeBuilder(..fb, code: [instr, ..fb.code]) })
+}
+
+fn match_storage_types(ft1: FieldType, ft2: FieldType) -> Result(Nil, String) {
+  case ft1, ft2 {
+    PackedType(packed_type: pt1, ..), PackedType(packed_type: pt2, ..) ->
+      match_packed_types(pt1, pt2)
+    ValueType(value_type: vt1, ..), ValueType(value_type: vt2, ..) ->
+      match_value_types(vt1, vt2)
+    ValueType(..), PackedType(..) ->
+      Error("Mismatched storage types: value type vs packed type")
+    PackedType(..), ValueType(..) ->
+      Error("Mismatched storage types: packed type vs value type")
+  }
+}
+
+fn match_packed_types(pt1: PackedType, pt2: PackedType) -> Result(Nil, String) {
+  case pt1 == pt2 {
+    True -> Ok(Nil)
+    False ->
+      Error(
+        "Mismatched storage types: "
+        <> packed_type_to_string(pt1)
+        <> " vs "
+        <> packed_type_to_string(pt2),
+      )
+  }
+}
+
+fn match_value_types(vt1: ValueType, vt2: ValueType) -> Result(Nil, String) {
+  case vt1, vt2 {
+    I32, I32 | I64, I64 | F32, F32 | F64, F64 | V128, V128 -> Ok(Nil)
+    Ref(rt1), Ref(rt2) -> match_reference_types(rt1, rt2)
+    _, _ ->
+      Error(
+        "Mismatched value types: "
+        <> value_type_to_string(vt1)
+        <> " vs "
+        <> value_type_to_string(vt2),
+      )
+  }
+}
+
+fn match_reference_types(rt1: RefType, rt2: RefType) -> Result(Nil, String) {
+  case rt1, rt2 {
+    NonNull(ht1), NonNull(ht2)
+    | NonNull(ht1), Nullable(ht2)
+    | Nullable(ht1), Nullable(ht2)
+    -> match_heap_types(ht1, ht2)
+    _, _ ->
+      Error("Mismatched reference types: type 1 is nullable while type 2 isn't")
+  }
+}
+
+fn match_heap_types(ht1: HeapType, ht2: HeapType) -> Result(Nil, String) {
+  todo
 }
 
 fn label_by_index(fb: CodeBuilder, label_index: Int) -> Result(Label, String) {
@@ -1798,6 +1931,24 @@ fn heap_type_to_string(t: HeapType) {
     AbstractNone -> "none"
     AbstractStruct -> "struct"
     ConcreteType(idx) -> int.to_string(idx)
+  }
+}
+
+fn field_type_to_string(ft: FieldType) {
+  let st = case ft {
+    PackedType(packed_type: pt, ..) -> packed_type_to_string(pt)
+    ValueType(value_type: vt, ..) -> value_type_to_string(vt)
+  }
+  case ft.mutable {
+    Mutable -> "(mut" <> st <> ")"
+    Immutable -> st
+  }
+}
+
+fn packed_type_to_string(pt: PackedType) -> String {
+  case pt {
+    I8 -> "i8"
+    I16 -> "i16"
   }
 }
 
@@ -2674,6 +2825,18 @@ fn encode_instruction(instr: Instruction) -> BytesTree {
         code_instr_array_new_default,
         leb128_encode_unsigned(type_index),
       ])
+    ArrayNewFixed(type_index:, size:) ->
+      bytes_tree.concat_bit_arrays([
+        code_instr_array_new_fixed,
+        leb128_encode_unsigned(type_index),
+        leb128_encode_unsigned(size),
+      ])
+    ArrayNewData(type_index:, data_index:) ->
+      bytes_tree.concat_bit_arrays([
+        code_instr_array_new_data,
+        leb128_encode_unsigned(type_index),
+        leb128_encode_unsigned(data_index),
+      ])
     ArrayGet(type_index) ->
       bytes_tree.concat_bit_arrays([
         code_instr_array_get,
@@ -2695,6 +2858,23 @@ fn encode_instruction(instr: Instruction) -> BytesTree {
         leb128_encode_unsigned(type_index),
       ])
     ArrayLen -> bytes_tree.concat_bit_arrays([code_instr_array_len])
+    ArrayFill(type_index:) ->
+      bytes_tree.concat_bit_arrays([
+        code_instr_array_fill,
+        leb128_encode_unsigned(type_index),
+      ])
+    ArrayCopy(type_index:, source_type_index:) ->
+      bytes_tree.concat_bit_arrays([
+        code_instr_array_copy,
+        leb128_encode_unsigned(type_index),
+        leb128_encode_unsigned(source_type_index),
+      ])
+    ArrayInitData(type_index:, data_index:) ->
+      bytes_tree.concat_bit_arrays([
+        code_instr_array_init_data,
+        leb128_encode_unsigned(type_index),
+        leb128_encode_unsigned(data_index),
+      ])
     // TODO: remaining reference instructions
     //
     // Parametric instructions
@@ -3164,13 +3344,22 @@ fn instruction_to_string(instr: Instruction) -> String {
       instr2("struct.set", type_index, field_index)
     ArrayNew(type_index) -> instr1("array.new", type_index)
     ArrayNewDefault(type_index) -> instr1("array.new_default", type_index)
-    // TODO: ArrayNewFixed, ArrayNewElem, ArrayNewData
+    ArrayNewFixed(type_index:, size:) ->
+      instr2("array.new_fixed", type_index, size)
+    ArrayNewData(type_index:, data_index:) ->
+      instr2("array.new_data", type_index, data_index)
+    // TODO: ArrayNewElem
     ArrayGet(type_index) -> instr1("array.get", type_index)
     ArrayGetS(type_index) -> instr1("array.get_s", type_index)
     ArrayGetU(type_index) -> instr1("array.get_u", type_index)
     ArraySet(type_index) -> instr1("array.set", type_index)
     ArrayLen -> "array.len"
-    // TODO: ArrayCopy, ArrayInitElem, ArrayInitData
+    ArrayFill(type_index:) -> instr1("array.fill", type_index)
+    ArrayCopy(type_index:, source_type_index:) ->
+      instr2("array.copy", type_index, source_type_index)
+    ArrayInitData(type_index:, data_index:) ->
+      instr2("array.init_data", type_index, data_index)
+    // TODO: ArrayInitElem
     // TODO: remaining reference instructions
     //
     // Parametric instructions
@@ -3263,8 +3452,8 @@ fn instruction_to_string(instr: Instruction) -> String {
     F64Gt -> "f64.gt"
     F64Le -> "f64.le"
     F64Ge -> "f64.ge"
-    I32CntLZ -> todo
-    I32CntTZ -> todo
+    I32CntLZ -> "i32.clz"
+    I32CntTZ -> "i32.ctz"
     I32PopCnt -> "i32.popcnt"
     I32Add -> "i32.add"
     I32Sub -> "i32.sub"
@@ -3281,8 +3470,8 @@ fn instruction_to_string(instr: Instruction) -> String {
     I32ShLU -> "i32.shr_u"
     I32RotL -> "i32.rotl"
     I32RotR -> "i32.rotr"
-    I64CntLZ -> todo
-    I64CntTZ -> todo
+    I64CntLZ -> "i64.clz"
+    I64CntTZ -> "i64.ctz"
     I64PopCnt -> "i64.popcnt"
     I64Add -> "i64.add"
     I64Sub -> "i64.sub"
@@ -3836,6 +4025,12 @@ const code_instr_array_new = <<0xfb, 6>>
 
 const code_instr_array_new_default = <<0xfb, 7>>
 
+const code_instr_array_new_fixed = <<0xfb, 8>>
+
+const code_instr_array_new_data = <<0xfb, 9>>
+
+// missing: array.new_elem
+
 const code_instr_array_get = <<0xfb, 11>>
 
 const code_instr_array_get_s = <<0xfb, 12>>
@@ -3845,6 +4040,14 @@ const code_instr_array_get_u = <<0xfb, 13>>
 const code_instr_array_set = <<0xfb, 14>>
 
 const code_instr_array_len = <<0xfb, 15>>
+
+const code_instr_array_fill = <<0xfb, 16>>
+
+const code_instr_array_copy = <<0xfb, 17>>
+
+const code_instr_array_init_data = <<0xfb, 18>>
+
+// missing: array.init_elem
 
 const code_instr_ref_test_nonnull = <<0xfb, 20>>
 
