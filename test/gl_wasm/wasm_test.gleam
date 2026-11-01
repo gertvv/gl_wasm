@@ -1151,7 +1151,7 @@ pub fn active_memory_init_test() {
     use gb <- result.try(wasm.add_instruction(gb, wasm.End))
     use mb <- result.try(wasm.finalize_global(mb, gb))
     use mb <- result.try(wasm.add_memory(mb, 1, None))
-    use #(mb, db) <- result.try(wasm.create_active_data_builder(
+    use db <- result.try(wasm.create_active_data_builder(
       mb,
       <<"Hello, WASM!":utf8>>,
       0,

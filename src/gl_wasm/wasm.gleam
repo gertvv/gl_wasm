@@ -117,7 +117,6 @@ pub opaque type ModuleBuilder {
     elements: List(ElementDefinition),
     /// data segments stored in reverse order
     data: List(DataDefinition),
-    next_data_index: Int,
   )
 }
 
@@ -160,7 +159,7 @@ pub type BuildType {
     mutable: Mutability,
     value_type: ValueType,
   )
-  BuildActiveDataOffset(data_index: Int)
+  BuildActiveDataOffset(init: BitArray, memory_index: Int)
   BuildActiveElementOffsetExpr(ref_type: RefType, table_index: Int)
   BuildActiveElementOffsetIdx(func_indices: List(Int), table_index: Int)
   BuildElementInitializer
@@ -245,7 +244,6 @@ pub type ElementInitializer {
 pub type DataDefinition {
   PassiveData(init: BitArray)
   ActiveData(init: BitArray, memory_index: Int, offset: List(Instruction))
-  ActiveDataMissingOffset(init: BitArray, memory_index: Int)
 }
 
 pub type Limits {
@@ -599,7 +597,6 @@ pub fn create_module_builder(name: Option(String)) -> ModuleBuilder {
     start_function_index: None,
     elements: [],
     data: [],
-    next_data_index: 0,
   )
 }
 
@@ -2182,7 +2179,7 @@ pub fn get_data_by_index(
   mb: ModuleBuilder,
   data_index: Int,
 ) -> Result(DataDefinition, String) {
-  list_index(mb.data, mb.next_data_index - data_index - 1)
+  list_index(mb.data, list.length(mb.data) - data_index - 1)
   |> result.replace_error(
     "Data index " <> int.to_string(data_index) <> " does not exist",
   )
@@ -2441,11 +2438,7 @@ pub fn add_passive_data(
   init: BitArray,
 ) -> Result(ModuleBuilder, String) {
   use _ <- result.map(ensure_data_is_bytes(init))
-  ModuleBuilder(
-    ..mb,
-    data: [PassiveData(init), ..mb.data],
-    next_data_index: mb.next_data_index + 1,
-  )
+  ModuleBuilder(..mb, data: [PassiveData(init), ..mb.data])
 }
 
 /// Create a builder for an active data segment.
@@ -2455,51 +2448,24 @@ pub fn create_active_data_builder(
   mb: ModuleBuilder,
   init: BitArray,
   memory_index: Int,
-) -> Result(#(ModuleBuilder, CodeBuilder), String) {
+) -> Result(CodeBuilder, String) {
   use _ <- result.try(ensure_data_is_bytes(init))
-  let data = ActiveDataMissingOffset(init:, memory_index:)
-  let module_builder =
-    ModuleBuilder(
-      ..mb,
-      data: [data, ..mb.data],
-      next_data_index: mb.next_data_index + 1,
-    )
-  create_code_builder(
-    module_builder,
-    BuildActiveDataOffset(data_index: mb.next_data_index),
-    [],
-    [],
-    [I32],
-  )
-  |> result.map(fn(builder) { #(module_builder, builder) })
+  create_code_builder(mb, BuildActiveDataOffset(init:, memory_index:), [], [], [
+    I32,
+  ])
 }
 
-/// Complete the `CodeBuilder` and replace the corresponding placeholder in
-/// `ModuleBuilder` by the completed active data segment.
+/// Complete the `CodeBuilder` and add the data segment to the `ModuleBuilder`.
 pub fn finalize_active_data(
   mb: ModuleBuilder,
-  fb: CodeBuilder,
+  cb: CodeBuilder,
 ) -> Result(ModuleBuilder, String) {
-  case fb.builds, fb.label_stack {
-    BuildActiveDataOffset(data_index:), [] ->
-      case get_data_by_index(mb, data_index) {
-        Ok(ActiveDataMissingOffset(init:, memory_index:)) ->
-          list_replace(
-            mb.data,
-            mb.next_data_index - data_index - 1,
-            ActiveData(init:, memory_index:, offset: list.reverse(fb.code)),
-          )
-          |> result.replace_error(
-            "No data at index " <> int.to_string(data_index),
-          )
-          |> result.map(fn(data) { ModuleBuilder(..mb, data:) })
-        Error(msg) -> Error(msg)
-        _ ->
-          Error(
-            "No active data is being built at index "
-            <> int.to_string(data_index),
-          )
-      }
+  case cb.builds, cb.label_stack {
+    BuildActiveDataOffset(init:, memory_index:), [] -> {
+      let offset = list.reverse(cb.code)
+      let data = ActiveData(init:, memory_index:, offset:)
+      Ok(ModuleBuilder(..mb, data: [data, ..mb.data]))
+    }
     BuildActiveDataOffset(..), _ -> Error("Initializer incomplete")
     _, _ -> Error("CodeBuilder does not build a memory offset for active data")
   }
@@ -2678,7 +2644,7 @@ pub fn emit_module(
   ))
 
   // emit data count section
-  use os <- result.try(case mb.next_data_index {
+  use os <- result.try(case list.length(mb.data) {
     0 -> Ok(os)
     n ->
       write_bytes(
@@ -3009,8 +2975,6 @@ fn encode_data(
       |> bytes_tree.concat
       |> Ok
     }
-    ActiveDataMissingOffset(..) ->
-      Error(ValidationError("Unfinalized active data segment"))
   }
 }
 
