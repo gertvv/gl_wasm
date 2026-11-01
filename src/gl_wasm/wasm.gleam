@@ -102,13 +102,19 @@ pub opaque type ModuleBuilder {
     /// functions stored in reverse order
     functions: List(FunctionDefinition),
     next_function_index: Int,
+    /// tables stored in reverse order
+    tables: List(TableDefinition),
     /// memories stored in reverse order (max. 1 for now)
     memories: List(MemoryDefinition),
     /// globals stored in reverse order
     globals: List(GlobalDefinition),
     next_global_index: Int,
+    /// exports stored in reverse order
     exports: List(Export),
+    /// function index of the start (initalization) function
     start_function_index: Option(Int),
+    /// element segments stored in reverse order
+    elements: List(ElementDefinition),
     /// data segments stored in reverse order
     data: List(DataDefinition),
     next_data_index: Int,
@@ -131,6 +137,15 @@ pub opaque type CodeBuilder {
   )
 }
 
+/// Builder for an element segment, enables the creation of element initializers
+pub opaque type ElementBuilder {
+  ElementBuilder(
+    module_builder: ModuleBuilder,
+    builds: ElementDefinition,
+    inits: List(List(Instruction)),
+  )
+}
+
 type StackValueType {
   Unknown
   Known(ValueType)
@@ -138,6 +153,7 @@ type StackValueType {
 
 pub type BuildType {
   BuildFunction(function_index: Int, type_index: Int, name: Option(String))
+  BuildTable(limits: Limits, ref_type: RefType)
   BuildGlobal(
     global_index: Int,
     name: Option(String),
@@ -145,6 +161,9 @@ pub type BuildType {
     value_type: ValueType,
   )
   BuildActiveDataOffset(data_index: Int)
+  BuildActiveElementOffsetExpr(ref_type: RefType, table_index: Int)
+  BuildActiveElementOffsetIdx(func_indices: List(Int), table_index: Int)
+  BuildElementInitializer
 }
 
 pub type FunctionSignature {
@@ -193,9 +212,34 @@ pub type GlobalDefinition {
   )
 }
 
+pub type TableDefinition {
+  TableDefault(limits: Limits, ref_type: RefType)
+  TableInitialization(
+    limits: Limits,
+    ref_type: RefType,
+    offset: List(Instruction),
+  )
+}
+
 pub type MemoryDefinition {
   MemoryImport(limits: Limits, from: ImportSource)
   MemoryDeclaration(limits: Limits)
+}
+
+pub type ElementDefinition {
+  PassiveElement(ref_type: RefType, init: ElementInitializer)
+  ActiveElement(
+    ref_type: RefType,
+    init: ElementInitializer,
+    table_index: Int,
+    offset: List(Instruction),
+  )
+  DeclarativeElement(ref_type: RefType, init: ElementInitializer)
+}
+
+pub type ElementInitializer {
+  ElementByFunctionIndex(List(Int))
+  ElementByExpression(List(List(Instruction)))
 }
 
 pub type DataDefinition {
@@ -242,8 +286,8 @@ pub type ValueType {
 
 /// Reference type.
 pub type RefType {
-  NonNull(HeapType)
-  Nullable(HeapType)
+  NonNull(heap_type: HeapType)
+  Nullable(heap_type: HeapType)
 }
 
 /// Heap types classify the objects in the runtime store.
@@ -328,7 +372,7 @@ pub type Instruction {
   @deprecated("Use BranchIf instead")
   BreakIf(label_index: Int)
   BranchIf(label_index: Int)
-  // TODO: BreakTable
+  // TODO: BranchTable
   Return
   Call(function_index: Int)
   // TODO: CallIndirect
@@ -342,7 +386,7 @@ pub type Instruction {
   @deprecated("Use BranchOnNonNull instead")
   BreakOnNonNull(label_index: Int)
   BranchOnNonNull(label_index: Int)
-  // TODO: BreakOnCast*
+  // TODO: BranchOnCast*
   End
   //
   // Reference instructions
@@ -547,11 +591,13 @@ pub fn create_module_builder(name: Option(String)) -> ModuleBuilder {
     next_type_index: 0,
     functions: [],
     next_function_index: 0,
+    tables: [],
     memories: [],
     globals: [],
     next_global_index: 0,
     exports: [],
     start_function_index: None,
+    elements: [],
     data: [],
     next_data_index: 0,
   )
@@ -887,6 +933,45 @@ pub fn import_global(
   )
 }
 
+/// Add a table with default initialization to the `ModuleBuilder`.
+pub fn add_table_default(
+  mb: ModuleBuilder,
+  limits: Limits,
+  heap_type: HeapType,
+) -> Result(ModuleBuilder, String) {
+  let ref_type = Nullable(heap_type)
+  let value_type = Ref(ref_type)
+  use _ <- result.map(ensure_types_are_defined([value_type], mb.next_type_index))
+  let table = TableDefault(limits:, ref_type:)
+  ModuleBuilder(..mb, tables: [table, ..mb.tables])
+}
+
+/// Add a table with initialization expression to the `ModuleBuilder`.
+pub fn create_table_builder(
+  mb: ModuleBuilder,
+  limits: Limits,
+  ref_type: RefType,
+) -> Result(CodeBuilder, String) {
+  let value_type = Ref(ref_type)
+  use _ <- result.try(ensure_types_are_defined([value_type], mb.next_type_index))
+  create_code_builder(mb, BuildTable(limits:, ref_type:), [], [], [value_type])
+}
+
+pub fn finalize_table(
+  mb: ModuleBuilder,
+  cb: CodeBuilder,
+) -> Result(ModuleBuilder, String) {
+  case cb.builds, cb.label_stack {
+    BuildTable(limits:, ref_type:), [] -> {
+      let offset = list.reverse(cb.code)
+      let table = TableInitialization(limits:, ref_type:, offset:)
+      Ok(ModuleBuilder(..mb, tables: [table, ..mb.tables]))
+    }
+    BuildActiveDataOffset(..), _ -> Error("Initializer incomplete")
+    _, _ -> Error("CodeBuilder does not build a memory offset for active table")
+  }
+}
+
 fn create_code_builder(
   module_builder,
   builds,
@@ -903,7 +988,12 @@ fn create_code_builder(
         list.map(result, Known),
         False,
       )
-    BuildGlobal(..) | BuildActiveDataOffset(..) ->
+    BuildGlobal(..)
+    | BuildTable(..)
+    | BuildActiveDataOffset(..)
+    | BuildActiveElementOffsetExpr(..)
+    | BuildActiveElementOffsetIdx(..)
+    | BuildElementInitializer ->
       Label(
         LabelInitializer,
         0,
@@ -972,7 +1062,12 @@ pub fn add_instruction(
   // constant.
   use _ <- result.try(case fb.builds {
     BuildFunction(..) -> Ok(Nil)
-    BuildGlobal(..) | BuildActiveDataOffset(..) -> {
+    BuildGlobal(..)
+    | BuildTable(..)
+    | BuildActiveDataOffset(..)
+    | BuildActiveElementOffsetExpr(..)
+    | BuildActiveElementOffsetIdx(..)
+    | BuildElementInitializer -> {
       case instr {
         // TODO: RefI31, AnyConvertExtern, ExternConvertAny
         ArrayNew(_)
@@ -2071,6 +2166,17 @@ pub fn get_global_by_index(
   )
 }
 
+/// Get a table definition by index.
+pub fn get_table_by_index(
+  mb: ModuleBuilder,
+  table_index: Int,
+) -> Result(TableDefinition, String) {
+  list_index(mb.tables, { mb.next_global_index - 1 } - table_index)
+  |> result.replace_error(
+    "Table index " <> int.to_string(table_index) <> " does not exist",
+  )
+}
+
 /// Get a data definition by index.
 pub fn get_data_by_index(
   mb: ModuleBuilder,
@@ -2128,6 +2234,205 @@ fn add_memory_do(
       Error("Memory limits may not exceed 2^16")
     _, _, _ -> Ok(ModuleBuilder(..mb, memories: [def]))
   }
+}
+
+/// Create a builder for a passive element segment
+pub fn create_passive_element_builder(
+  mb: ModuleBuilder,
+  ref_type: RefType,
+) -> ElementBuilder {
+  element_builder_for(mb, PassiveElement(ref_type, ElementByExpression([])))
+}
+
+/// Create a passive element segment from function indices.
+/// To create an element containing other reference types, use `create_passive_element_builder`.
+pub fn add_passive_element(
+  mb: ModuleBuilder,
+  func_indices: List(Int),
+) -> Result(ModuleBuilder, String) {
+  use _ <- result.map(validate_function_indices(mb, func_indices))
+  let element =
+    PassiveElement(
+      ref_type: NonNull(AbstractFunc),
+      init: ElementByFunctionIndex(func_indices),
+    )
+  ModuleBuilder(..mb, elements: [element, ..mb.elements])
+}
+
+fn validate_function_indices(
+  mb: ModuleBuilder,
+  func_indices: List(Int),
+) -> Result(Nil, String) {
+  case
+    list.find(func_indices, fn(func_idx) {
+      func_idx < 0 || func_idx >= mb.next_function_index
+    })
+  {
+    Ok(idx) ->
+      Error("Function index " <> int.to_string(idx) <> " does not exist")
+    Error(_) -> Ok(Nil)
+  }
+}
+
+/// Create a builder for a declarative element segment
+pub fn create_declarative_element_builder(
+  mb: ModuleBuilder,
+  ref_type: RefType,
+) -> ElementBuilder {
+  element_builder_for(mb, DeclarativeElement(ref_type, ElementByExpression([])))
+}
+
+/// Create a declarative element segment from function indices.
+/// To create an element containing other reference types, use `create_declarative_element_builder`.
+pub fn add_declarative_element(
+  mb: ModuleBuilder,
+  func_indices: List(Int),
+) -> Result(ModuleBuilder, String) {
+  use _ <- result.map(validate_function_indices(mb, func_indices))
+  let element =
+    DeclarativeElement(
+      ref_type: NonNull(AbstractFunc),
+      init: ElementByFunctionIndex(func_indices),
+    )
+  ModuleBuilder(..mb, elements: [element, ..mb.elements])
+}
+
+/// Create a builder for the offset expression of an active element segment.
+/// Once the offset is finalized, a builder for the segment will be produced.
+pub fn create_active_element_offset_builder_for_element_builder(
+  mb: ModuleBuilder,
+  ref_type: RefType,
+  table_index: Int,
+) -> Result(CodeBuilder, String) {
+  use table <- result.try(get_table_by_index(mb, table_index))
+  use _ <- result.try(match_reference_types(table.ref_type, ref_type))
+  create_code_builder(
+    mb,
+    BuildActiveElementOffsetExpr(ref_type, table_index),
+    [],
+    [],
+    [I32],
+  )
+}
+
+pub fn finalize_active_element_offset_for_element_builder(
+  cb: CodeBuilder,
+) -> Result(ElementBuilder, String) {
+  case cb.builds, cb.label_stack {
+    BuildActiveElementOffsetExpr(ref_type:, table_index:), [] -> {
+      let offset = list.reverse(cb.code)
+      Ok(element_builder_for(
+        cb.module_builder,
+        ActiveElement(
+          ref_type:,
+          init: ElementByExpression([]),
+          table_index:,
+          offset:,
+        ),
+      ))
+    }
+    BuildActiveDataOffset(..), _ -> Error("Initializer incomplete")
+    _, _ ->
+      Error(
+        "CodeBuilder does not build a table offset for active element by expression",
+      )
+  }
+}
+
+/// Create a builder for the offset expression of an active element segment.
+/// Once the offset is finalized, the element segment will be added to the `ModuleBuilder`.
+pub fn create_active_element_offset_builder_by_indices(
+  mb: ModuleBuilder,
+  table_index: Int,
+  func_indices: List(Int),
+) -> Result(CodeBuilder, String) {
+  use _ <- result.try(validate_function_indices(mb, func_indices))
+  use table <- result.try(get_table_by_index(mb, table_index))
+  use _ <- result.try(match_reference_types(
+    table.ref_type,
+    NonNull(AbstractFunc),
+  ))
+  create_code_builder(
+    mb,
+    BuildActiveElementOffsetIdx(func_indices, table_index),
+    [],
+    [],
+    [I32],
+  )
+}
+
+pub fn finalize_active_element_offset_by_indices(
+  mb: ModuleBuilder,
+  cb: CodeBuilder,
+) -> Result(ModuleBuilder, String) {
+  case cb.builds, cb.label_stack {
+    BuildActiveElementOffsetIdx(func_indices:, table_index:), [] -> {
+      let offset = list.reverse(cb.code)
+      let element =
+        ActiveElement(
+          ref_type: NonNull(AbstractFunc),
+          init: ElementByFunctionIndex(func_indices),
+          table_index:,
+          offset:,
+        )
+      Ok(ModuleBuilder(..mb, elements: [element, ..mb.elements]))
+    }
+    BuildActiveDataOffset(..), _ -> Error("Initializer incomplete")
+    _, _ ->
+      Error(
+        "CodeBuilder does not build a table offset for active element by expression",
+      )
+  }
+}
+
+pub fn create_element_initializer_builder(
+  eb: ElementBuilder,
+) -> Result(CodeBuilder, String) {
+  create_code_builder(eb.module_builder, BuildElementInitializer, [], [], [
+    Ref(eb.builds.ref_type),
+  ])
+}
+
+/// Finalize an element initializer, adding it to the element segment
+pub fn finalize_element_initializer(
+  eb: ElementBuilder,
+  cb: CodeBuilder,
+) -> Result(ElementBuilder, String) {
+  case cb.builds, cb.label_stack {
+    BuildElementInitializer, [] -> {
+      use <- bool.guard(
+        cb.result != [Ref(eb.builds.ref_type)],
+        Error("CodeBuilder returns unexpected ref_type"),
+      )
+      let init = list.reverse(cb.code)
+      let eb = ElementBuilder(..eb, inits: [init, ..eb.inits])
+      Ok(eb)
+    }
+    BuildActiveDataOffset(..), _ -> Error("Initializer incomplete")
+    _, _ -> Error("CodeBuilder does not build an element initializer")
+  }
+}
+
+/// Finalize an elements segment, adding it to the ModuleBuilder
+pub fn finalize_element(
+  mb: ModuleBuilder,
+  eb: ElementBuilder,
+) -> Result(ModuleBuilder, String) {
+  let init = ElementByExpression(list.reverse(eb.inits))
+  let element = eb.builds
+  use element <- result.map(case element {
+    PassiveElement(..) -> Ok(PassiveElement(..element, init:))
+    ActiveElement(..) -> Ok(ActiveElement(..element, init:))
+    DeclarativeElement(..) -> Ok(DeclarativeElement(..element, init:))
+  })
+  ModuleBuilder(..mb, elements: [element, ..mb.elements])
+}
+
+fn element_builder_for(
+  mb: ModuleBuilder,
+  segment: ElementDefinition,
+) -> ElementBuilder {
+  ElementBuilder(module_builder: mb, builds: segment, inits: [])
 }
 
 /// Add a passive data segment.
@@ -2282,7 +2587,31 @@ pub fn emit_module(
     func_types,
   ))
 
-  // TODO: emit tables
+  // emit tables
+  let tables =
+    list.reverse(mb.tables)
+    |> list.filter_map(fn(table) {
+      let type_encoding =
+        bytes_tree.concat([
+          encode_ref_type(table.ref_type),
+          encode_limits(table.limits),
+        ])
+      case table {
+        TableDefault(..) -> Ok(type_encoding)
+        TableInitialization(offset:, ..) ->
+          bytes_tree.concat([
+            bt(<<0x40, 0x00>>),
+            type_encoding,
+            ..list.map(offset, encode_instruction)
+          ])
+          |> Ok
+      }
+    })
+  use os <- result.try(emit_vector_section_conditional(
+    os,
+    section_table,
+    tables,
+  ))
 
   // emit memory declarations
   let memories =
@@ -2338,7 +2667,15 @@ pub fn emit_module(
     None -> Ok(os)
   })
 
-  // TODO: emit elements
+  // emit element section
+  let elements =
+    list.reverse(mb.elements)
+    |> list.map(encode_element)
+  use os <- result.try(emit_vector_section_conditional(
+    os,
+    section_elem,
+    elements,
+  ))
 
   // emit data count section
   use os <- result.try(case mb.next_data_index {
@@ -2445,17 +2782,23 @@ fn encode_value_type(t: ValueType) -> BytesTree {
     I64 -> bt(code_type_i64)
     F32 -> bt(code_type_f32)
     F64 -> bt(code_type_f64)
-    Ref(NonNull(heap_type)) ->
+    V128 -> bt(code_type_v128)
+    Ref(ref_type) -> encode_ref_type(ref_type)
+  }
+}
+
+fn encode_ref_type(t: RefType) -> BytesTree {
+  case t {
+    NonNull(heap_type:) ->
       bytes_tree.prepend(
         prefix: code_ref_non_null,
         to: encode_heap_type(heap_type),
       )
-    Ref(Nullable(heap_type)) ->
+    Nullable(heap_type:) ->
       bytes_tree.prepend(
         prefix: code_ref_nullable,
         to: encode_heap_type(heap_type),
       )
-    V128 -> bt(code_type_v128)
   }
 }
 
@@ -2595,6 +2938,56 @@ fn encode_limits(limits: Limits) -> BytesTree {
   |> bytes_tree.concat_bit_arrays
 }
 
+fn encode_element(def: ElementDefinition) -> BytesTree {
+  case def.init {
+    ElementByFunctionIndex(func_indices) -> {
+      let inits =
+        list.map(func_indices, leb128_encode_unsigned)
+        |> list.map(bt)
+        |> encode_vector
+      let header = case def {
+        PassiveElement(..) -> bt(<<1, 0>>)
+        ActiveElement(table_index: 0, offset:, ..) -> {
+          bytes_tree.concat([
+            bt(<<0>>),
+            encode_expr(offset),
+          ])
+        }
+        ActiveElement(table_index:, offset:, ..) -> {
+          bytes_tree.concat([
+            bt(<<2>>),
+            bt(leb128_encode_unsigned(table_index)),
+            encode_expr(offset),
+            bt(<<0>>),
+          ])
+        }
+        DeclarativeElement(..) -> bt(<<3, 0>>)
+      }
+      bytes_tree.append_tree(header, inits)
+    }
+    ElementByExpression(exprs) -> {
+      let ref_type = encode_ref_type(def.ref_type)
+      let inits = list.map(exprs, encode_expr) |> encode_vector
+      let header = case def {
+        PassiveElement(..) -> bt(<<5>>)
+        ActiveElement(table_index:, offset:, ..) -> {
+          bytes_tree.concat([
+            bt(<<6>>),
+            bt(leb128_encode_unsigned(table_index)),
+            encode_expr(offset),
+          ])
+        }
+        DeclarativeElement(..) -> bt(<<7>>)
+      }
+      bytes_tree.concat([header, ref_type, inits])
+    }
+  }
+}
+
+fn encode_expr(expr: List(Instruction)) -> BytesTree {
+  list.map(expr, encode_instruction) |> bytes_tree.concat
+}
+
 fn encode_data(
   data_definition: DataDefinition,
 ) -> Result(BytesTree, EmissionError(e)) {
@@ -2608,7 +3001,7 @@ fn encode_data(
         0 -> <<0x00>>
         n -> <<0x02, leb128_encode_unsigned(n):bits>>
       }
-      [bt(header), ..list.map(offset, encode_instruction)]
+      [bt(header), encode_expr(offset)]
       |> list.append([
         bt(leb128_encode_unsigned(bit_array.byte_size(init))),
         bt(init),
@@ -3597,6 +3990,8 @@ const section_import = <<2>>
 
 const section_func = <<3>>
 
+const section_table = <<4>>
+
 const section_memory = <<5>>
 
 const section_global = <<6>>
@@ -3604,6 +3999,8 @@ const section_global = <<6>>
 const section_export = <<7>>
 
 const section_start = <<8>>
+
+const section_elem = <<9>>
 
 const section_code = <<10>>
 
