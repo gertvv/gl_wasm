@@ -429,7 +429,14 @@ pub type Instruction {
   GlobalSet(global_index: Int)
   //
   // Table instructions
-  // TODO: table instructions
+  TableGet(table_index: Int)
+  TableSet(table_index: Int)
+  TableSize(table_index: Int)
+  TableGrow(table_index: Int)
+  TableFill(table_index: Int)
+  TableCopy(table_index: Int, source_table_index: Int)
+  TableInit(table_index: Int, element_index: Int)
+  ElemDrop(element_index: Int)
   //
   // Memory instructions
   I32Load(offset: Int, align: Int)
@@ -1027,6 +1034,14 @@ fn get_data(fb: CodeBuilder, data_index) {
   get_data_by_index(fb.module_builder, data_index)
 }
 
+fn get_table(fb: CodeBuilder, table_index) {
+  get_table_by_index(fb.module_builder, table_index)
+}
+
+fn get_element(fb: CodeBuilder, element_index) {
+  get_element_by_index(fb.module_builder, element_index)
+}
+
 /// Mark something for export.
 pub fn add_export(
   mb: ModuleBuilder,
@@ -1420,7 +1435,7 @@ pub fn add_instruction(
       use at2 <- result.try(get_type(fb, type_index))
       use pt2 <- result.try(get_array_item_type(at2, type_index))
       // TODO: check if the storage types match
-      use _ <- result.try(match_storage_types(pt1, pt2))
+      use _ <- result.try(match_storage_types(fb.module_builder, pt1, pt2))
       pop_push_known(
         fb,
         [
@@ -1473,6 +1488,28 @@ pub fn add_instruction(
         }
       })
       |> result.try(fn(t) { pop_push_known(fb, [t], []) })
+    TableGet(table_index) ->
+      get_table(fb, table_index)
+      |> result.try(fn(t) { pop_push_known(fb, [I32], [Ref(t.ref_type)]) })
+    TableSet(table_index) ->
+      get_table(fb, table_index)
+      |> result.try(fn(t) { pop_push_known(fb, [Ref(t.ref_type), I32], []) })
+    TableSize(table_index) ->
+      get_table(fb, table_index)
+      |> result.try(fn(_) { pop_push_known(fb, [], [I32]) })
+    TableGrow(table_index) ->
+      get_table(fb, table_index)
+      |> result.try(fn(t) { pop_push_known(fb, [Ref(t.ref_type), I32], [I32]) })
+    TableFill(table_index) ->
+      get_table(fb, table_index)
+      |> result.try(fn(t) {
+        pop_push_known(fb, [I32, Ref(t.ref_type), I32], [])
+      })
+    TableCopy(table_index, source_table_index) -> todo
+    TableInit(table_index, element_index) -> todo
+    ElemDrop(element_index) ->
+      get_element(fb, element_index)
+      |> result.map(fn(_) { fb })
     I32Load(offset, align) ->
       validate_memargs(fb, 32, offset, align)
       |> result.try(pop_push_known(_, [I32], [I32]))
@@ -1626,12 +1663,16 @@ pub fn add_instruction(
   |> result.map(fn(fb) { CodeBuilder(..fb, code: [instr, ..fb.code]) })
 }
 
-fn match_storage_types(ft1: FieldType, ft2: FieldType) -> Result(Nil, String) {
+fn match_storage_types(
+  mb: ModuleBuilder,
+  ft1: FieldType,
+  ft2: FieldType,
+) -> Result(Nil, String) {
   case ft1, ft2 {
     PackedType(packed_type: pt1, ..), PackedType(packed_type: pt2, ..) ->
       match_packed_types(pt1, pt2)
     ValueType(value_type: vt1, ..), ValueType(value_type: vt2, ..) ->
-      match_value_types(vt1, vt2)
+      match_value_types(mb, vt1, vt2)
     ValueType(..), PackedType(..) ->
       Error("Mismatched storage types: value type vs packed type")
     PackedType(..), ValueType(..) ->
@@ -1652,10 +1693,14 @@ fn match_packed_types(pt1: PackedType, pt2: PackedType) -> Result(Nil, String) {
   }
 }
 
-fn match_value_types(vt1: ValueType, vt2: ValueType) -> Result(Nil, String) {
+fn match_value_types(
+  mb: ModuleBuilder,
+  vt1: ValueType,
+  vt2: ValueType,
+) -> Result(Nil, String) {
   case vt1, vt2 {
     I32, I32 | I64, I64 | F32, F32 | F64, F64 | V128, V128 -> Ok(Nil)
-    Ref(rt1), Ref(rt2) -> match_reference_types(rt1, rt2)
+    Ref(rt1), Ref(rt2) -> match_reference_types(mb, rt1, rt2)
     _, _ ->
       Error(
         "Mismatched value types: "
@@ -1666,18 +1711,82 @@ fn match_value_types(vt1: ValueType, vt2: ValueType) -> Result(Nil, String) {
   }
 }
 
-fn match_reference_types(rt1: RefType, rt2: RefType) -> Result(Nil, String) {
+fn match_reference_types(
+  mb: ModuleBuilder,
+  rt1: RefType,
+  rt2: RefType,
+) -> Result(Nil, String) {
   case rt1, rt2 {
     NonNull(ht1), NonNull(ht2)
     | NonNull(ht1), Nullable(ht2)
     | Nullable(ht1), Nullable(ht2)
-    -> match_heap_types(ht1, ht2)
+    -> match_heap_types(mb, ht1, ht2)
     _, _ ->
       Error("Mismatched reference types: type 1 is nullable while type 2 isn't")
   }
 }
 
-fn match_heap_types(ht1: HeapType, ht2: HeapType) -> Result(Nil, String) {
+/// Whether ht1 matches ht2. This is *not* symmetric.
+fn match_heap_types(
+  mb: ModuleBuilder,
+  ht1: HeapType,
+  ht2: HeapType,
+) -> Result(Nil, String) {
+  let err =
+    Error(
+      "Mismatched heap types: "
+      <> heap_type_to_string(ht1)
+      <> " vs "
+      <> heap_type_to_string(ht2),
+    )
+  use <- bool.guard(ht1 == ht2, Ok(Nil))
+  case ht1, ht2 {
+    AbstractEq, AbstractAny
+    | AbstractI31, AbstractEq
+    | AbstractStruct, AbstractEq
+    | AbstractArray, AbstractEq
+    | AbstractI31, AbstractAny
+    | AbstractStruct, AbstractAny
+    | AbstractArray, AbstractAny
+    -> Ok(Nil)
+    AbstractNone, _ -> match_heap_types(mb, ht2, AbstractAny)
+    AbstractNoFunc, _ -> match_heap_types(mb, ht2, AbstractFunc)
+    AbstractNoExtern, _ -> match_heap_types(mb, ht2, AbstractExtern)
+    ConcreteType(i1), AbstractStruct -> {
+      let assert Ok(t1) = get_type_by_index(mb, i1)
+      case t1 {
+        Struct(..) -> Ok(Nil)
+        _ -> err
+      }
+    }
+    ConcreteType(i1), AbstractArray -> {
+      let assert Ok(t1) = get_type_by_index(mb, i1)
+      case t1 {
+        Array(..) -> Ok(Nil)
+        _ -> err
+      }
+    }
+    ConcreteType(i1), AbstractFunc -> {
+      let assert Ok(t1) = get_type_by_index(mb, i1)
+      case t1 {
+        Func(..) -> Ok(Nil)
+        _ -> err
+      }
+    }
+    ConcreteType(i1), ConcreteType(i2) -> {
+      let assert Ok(t1) = get_type_by_index(mb, i1)
+      let assert Ok(t2) = get_type_by_index(mb, i2)
+      match_defined_types(mb, t1, t2)
+    }
+    _, _ -> err
+  }
+}
+
+fn match_defined_types(
+  mb: ModuleBuilder,
+  t1: CompositeType,
+  t2: CompositeType,
+) -> Result(Nil, String) {
   todo
 }
 
@@ -2168,9 +2277,20 @@ pub fn get_table_by_index(
   mb: ModuleBuilder,
   table_index: Int,
 ) -> Result(TableDefinition, String) {
-  list_index(mb.tables, { mb.next_global_index - 1 } - table_index)
+  list_index(mb.tables, list.length(mb.tables) - table_index - 1)
   |> result.replace_error(
     "Table index " <> int.to_string(table_index) <> " does not exist",
+  )
+}
+
+/// Get an element definition by index.
+pub fn get_element_by_index(
+  mb: ModuleBuilder,
+  element_index: Int,
+) -> Result(ElementDefinition, String) {
+  list_index(mb.elements, list.length(mb.elements) - element_index - 1)
+  |> result.replace_error(
+    "Element index " <> int.to_string(element_index) <> " does not exist",
   )
 }
 
@@ -2302,7 +2422,7 @@ pub fn create_active_element_offset_builder_for_element_builder(
   table_index: Int,
 ) -> Result(CodeBuilder, String) {
   use table <- result.try(get_table_by_index(mb, table_index))
-  use _ <- result.try(match_reference_types(table.ref_type, ref_type))
+  use _ <- result.try(match_reference_types(mb, table.ref_type, ref_type))
   create_code_builder(
     mb,
     BuildActiveElementOffsetExpr(ref_type, table_index),
@@ -2346,6 +2466,7 @@ pub fn create_active_element_offset_builder_by_indices(
   use _ <- result.try(validate_function_indices(mb, func_indices))
   use table <- result.try(get_table_by_index(mb, table_index))
   use _ <- result.try(match_reference_types(
+    mb,
     table.ref_type,
     NonNull(AbstractFunc),
   ))
@@ -3271,7 +3392,56 @@ fn encode_instruction(instr: Instruction) -> BytesTree {
       ])
     //
     // Table instructions
-    // TODO: table instructions
+    TableGet(table_index) -> {
+      bytes_tree.concat_bit_arrays([
+        code_instr_table_get,
+        leb128_encode_unsigned(table_index),
+      ])
+    }
+    TableSet(table_index) -> {
+      bytes_tree.concat_bit_arrays([
+        code_instr_table_set,
+        leb128_encode_unsigned(table_index),
+      ])
+    }
+    TableSize(table_index) -> {
+      bytes_tree.concat_bit_arrays([
+        code_instr_table_size,
+        leb128_encode_unsigned(table_index),
+      ])
+    }
+    TableGrow(table_index) -> {
+      bytes_tree.concat_bit_arrays([
+        code_instr_table_grow,
+        leb128_encode_unsigned(table_index),
+      ])
+    }
+    TableFill(table_index) -> {
+      bytes_tree.concat_bit_arrays([
+        code_instr_table_fill,
+        leb128_encode_unsigned(table_index),
+      ])
+    }
+    TableCopy(table_index, source_table_index) -> {
+      bytes_tree.concat_bit_arrays([
+        code_instr_table_copy,
+        leb128_encode_unsigned(table_index),
+        leb128_encode_unsigned(source_table_index),
+      ])
+    }
+    TableInit(table_index, element_index) -> {
+      bytes_tree.concat_bit_arrays([
+        code_instr_table_copy,
+        leb128_encode_unsigned(table_index),
+        leb128_encode_unsigned(element_index),
+      ])
+    }
+    ElemDrop(element_index) -> {
+      bytes_tree.concat_bit_arrays([
+        code_instr_table_fill,
+        leb128_encode_unsigned(element_index),
+      ])
+    }
     //
     // Memory instructions
     I32Load(offset, align) ->
@@ -3655,7 +3825,7 @@ fn ref_type_to_string(ref_type: RefType) {
   }
 }
 
-fn instruction_to_string(instr: Instruction) -> String {
+pub fn instruction_to_string(instr: Instruction) -> String {
   case instr {
     // Control instructions
     Unreachable -> "unreachable"
@@ -3737,7 +3907,16 @@ fn instruction_to_string(instr: Instruction) -> String {
     GlobalSet(global_index) -> instr1("global.set", global_index)
     //
     // Table instructions
-    // TODO: table instructions
+    TableGet(table_index) -> instr1("table.get", table_index)
+    TableSet(table_index) -> instr1("table.set", table_index)
+    TableSize(table_index) -> instr1("table.size", table_index)
+    TableGrow(table_index) -> instr1("table.grow", table_index)
+    TableFill(table_index) -> instr1("table.fill", table_index)
+    TableCopy(table_index, source_table_index) ->
+      instr2("table.copy", table_index, source_table_index)
+    TableInit(table_index, element_index) ->
+      instr2("table.init", table_index, element_index)
+    ElemDrop(element_index) -> instr1("elem.drop", element_index)
     //
     // Memory instructions
     I32Load(offset, align) -> instr_mem("i32.load", offset, align)
@@ -4093,6 +4272,22 @@ const code_instr_local_tee = <<0x22>>
 const code_instr_global_get = <<0x23>>
 
 const code_instr_global_set = <<0x24>>
+
+const code_instr_table_get = <<0x25>>
+
+const code_instr_table_set = <<0x26>>
+
+const code_instr_table_init = <<0xFC, 12>>
+
+const code_instr_elem_drop = <<0xFC, 13>>
+
+const code_instr_table_copy = <<0xFC, 14>>
+
+const code_instr_table_grow = <<0xFC, 15>>
+
+const code_instr_table_size = <<0xFC, 16>>
+
+const code_instr_table_fill = <<0xFC, 17>>
 
 const code_instr_i32_load = <<0x28>>
 
